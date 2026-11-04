@@ -47,6 +47,16 @@ export interface SessionSummary {
   turnCount: number;
 }
 
+export interface ListedModel {
+  id: string;
+  displayName: string;
+}
+
+export interface ModelCatalog {
+  models: ListedModel[];
+  errorCode: "no_key" | "unauthorized" | "failed" | null;
+}
+
 export interface ClaudeDetectResult {
   found: boolean;
   path: string | null;

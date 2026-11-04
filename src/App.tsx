@@ -17,6 +17,7 @@ import type {
   ClaudeDetectResult,
   GuiSession,
   KeyStatus,
+  ModelCatalog,
   SessionCostReport,
   SessionSummary,
   WorkspaceSpend,
@@ -74,6 +75,7 @@ export default function App() {
   const [spend, setSpend] = useState<WorkspaceSpend | null>(null);
   const [costReport, setCostReport] = useState<SessionCostReport | null>(null);
   const [showCosts, setShowCosts] = useState(false);
+  const [catalog, setCatalog] = useState<ModelCatalog>({ models: [], errorCode: null });
   const [detect, setDetect] = useState<ClaudeDetectResult | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [active, setActive] = useState<GuiSession | null>(null);
@@ -96,6 +98,14 @@ export default function App() {
     setSpend(month);
   }, []);
 
+  const refreshModels = useCallback(async () => {
+    try {
+      setCatalog(await api.listModels());
+    } catch {
+      setCatalog({ models: [], errorCode: "failed" });
+    }
+  }, []);
+
   const bootstrap = useCallback(async () => {
     try {
       const [s, k, admin, d] = await Promise.all([
@@ -114,13 +124,14 @@ export default function App() {
       } catch {
         setSpend({ state: "error", amountUsd: null, errorCode: "failed" });
       }
+      await refreshModels();
       if (!k.configured || !d.found) setView("settings");
     } catch (e) {
       setError(String(e));
     } finally {
       setBootstrapped(true);
     }
-  }, [refreshMoney, refreshSessions]);
+  }, [refreshModels, refreshMoney, refreshSessions]);
 
   useEffect(() => {
     void bootstrap();
@@ -154,7 +165,7 @@ export default function App() {
         sessionId: active.id,
         prompt: text,
         cwd: active.cwd,
-        model: active.model ?? settings.model,
+        model: active.model,
         allowedToolsPreset: active.allowedToolsPreset,
       });
       setActive(res.session);
@@ -347,6 +358,7 @@ export default function App() {
             settings={settings}
             keyStatus={keyStatus}
             adminKeyStatus={adminKeyStatus}
+            catalog={catalog}
             detect={detect}
             onClose={() => setView("chat")}
             onSaved={async () => {
@@ -354,7 +366,10 @@ export default function App() {
               setView("chat");
             }}
             onSettings={setSettings}
-            onKeyStatus={setKeyStatus}
+            onKeyStatus={(status) => {
+              setKeyStatus(status);
+              void refreshModels();
+            }}
             onAdminKeyStatus={setAdminKeyStatus}
             onAdminChanged={() => {
               void refreshMoney().catch(() => {
@@ -509,6 +524,7 @@ export default function App() {
         defaultCwd={settings.defaultCwd}
         defaultModel={settings.model}
         defaultTools={settings.allowedToolsPreset}
+        catalog={catalog}
         onCreate={async ({ cwd, model, tools }) => {
           const session = await api.createSession({
             cwd,

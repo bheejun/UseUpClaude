@@ -1,3 +1,4 @@
+mod catalog;
 mod cli;
 mod cost;
 mod discover;
@@ -185,7 +186,7 @@ fn create_session(
         cli_session_id,
         cwd,
         title,
-        model: model.or(settings.model),
+        model: normalize_model(model),
         allowed_tools_preset: allowed_tools_preset
             .unwrap_or(settings.allowed_tools_preset),
         created_at: now,
@@ -354,10 +355,18 @@ async fn send_message(
     }
 
     let resume = session.cli_session_id.clone();
-    let model = request
-        .model
-        .or(session.model.clone())
-        .or(settings.model.clone());
+    // Existing chats keep the model stored on the session. Null means CLI default, so --model is omitted.
+    let model = if request.session_id.is_some() {
+        normalize_model(session.model.clone())
+    } else {
+        normalize_model(
+            request
+                .model
+                .clone()
+                .or(session.model.clone())
+                .or(settings.model.clone()),
+        )
+    };
     let tools = request
         .allowed_tools_preset
         .unwrap_or_else(|| session.allowed_tools_preset.clone());
@@ -507,7 +516,7 @@ fn create_session_inner(
         cli_session_id: None,
         cwd,
         title: "New chat".into(),
-        model: model.or(settings.model),
+        model: normalize_model(model),
         allowed_tools_preset: allowed_tools_preset
             .unwrap_or(settings.allowed_tools_preset),
         created_at: now,
@@ -597,6 +606,28 @@ fn turn_cost_usd(turn: &GuiTurn) -> Option<f64> {
         .filter(|cost| cost.is_finite())
 }
 
+fn normalize_model(raw: Option<String>) -> Option<String> {
+    let trimmed = raw?.trim().to_string();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || trimmed.starts_with("sk-ant")
+        || trimmed.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return None;
+    }
+    Some(trimmed)
+}
+
+#[tauri::command]
+async fn list_models(state: State<'_, AppState>) -> Result<catalog::ModelCatalog, String> {
+    let settings = state.store.load_settings().map_err(err)?;
+    let stored = secrets::load_api_key().map_err(err)?;
+    let Some(key) = catalog::chat_key_for_catalog(stored.as_deref()) else {
+        return Ok(catalog::ModelCatalog::no_key());
+    };
+    Ok(catalog::fetch_models(&key, settings.workspace_id.as_deref()).await)
+}
+
 fn session_cost_usd(session: &GuiSession) -> Option<f64> {
     let mut sum = 0.0;
     let mut any = false;
@@ -629,6 +660,7 @@ pub fn run() {
             delete_admin_api_key,
             get_workspace_spend,
             session_costs,
+            list_models,
             detect_claude,
             list_sessions,
             get_session,

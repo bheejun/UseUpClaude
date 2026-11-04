@@ -10,7 +10,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ModelSelect, modelListMessage } from "@/components/model-select";
 import { useI18n } from "@/i18n";
+import type { ModelCatalog } from "@/types";
 
 export function NewChatDialog({
   open: isOpen,
@@ -18,6 +20,7 @@ export function NewChatDialog({
   defaultCwd,
   defaultModel,
   defaultTools,
+  catalog,
   onCreate,
 }: {
   open: boolean;
@@ -25,6 +28,7 @@ export function NewChatDialog({
   defaultCwd: string | null;
   defaultModel: string | null;
   defaultTools: string;
+  catalog: ModelCatalog;
   onCreate: (args: { cwd: string; model: string | null; tools: string }) => Promise<void>;
 }) {
   const { t } = useI18n();
@@ -75,12 +79,16 @@ export function NewChatDialog({
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="model">{t("modelOptional")}</Label>
-            <Input
+            <ModelSelect
               id="model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={t("modelPlaceholder")}
+              value={model || null}
+              models={catalog.models}
+              onChange={(next) => setModel(next ?? "")}
             />
+            <p className="text-[12px] text-muted-foreground">{t("modelHint")}</p>
+            {modelListMessage(catalog, t) && (
+              <p className="text-[12px] text-muted-foreground">{modelListMessage(catalog, t)}</p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="tools">{t("allowedTools")}</Label>

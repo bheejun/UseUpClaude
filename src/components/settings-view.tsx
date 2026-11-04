@@ -4,13 +4,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/api";
+import { ModelSelect, modelListMessage } from "@/components/model-select";
 import { LanguageSelect, useI18n } from "@/i18n";
-import type { AppSettings, ClaudeDetectResult, KeyStatus } from "@/types";
+import type { AppSettings, ClaudeDetectResult, KeyStatus, ModelCatalog } from "@/types";
 
 export function SettingsView({
   settings,
   keyStatus,
   adminKeyStatus,
+  catalog,
   detect,
   onClose,
   onSaved,
@@ -23,6 +25,7 @@ export function SettingsView({
   settings: AppSettings;
   keyStatus: KeyStatus;
   adminKeyStatus: KeyStatus;
+  catalog: ModelCatalog;
   detect: ClaudeDetectResult | null;
   onClose: () => void;
   onSaved: () => Promise<void>;
@@ -314,12 +317,16 @@ export function SettingsView({
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="model">{t("defaultModel")}</Label>
-            <Input
+            <ModelSelect
               id="model"
-              value={draft.model ?? ""}
-              placeholder={t("cliDefault")}
-              onChange={(e) => setDraft({ ...draft, model: e.target.value || null })}
+              value={draft.model}
+              models={catalog.models}
+              onChange={(model) => setDraft({ ...draft, model })}
             />
+            <p className="text-[12px] text-muted-foreground">{t("modelHint")}</p>
+            {modelListMessage(catalog, t) && (
+              <p className="text-[12px] text-muted-foreground">{modelListMessage(catalog, t)}</p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="default-tools">{t("defaultTools")}</Label>
