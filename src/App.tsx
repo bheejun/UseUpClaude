@@ -4,7 +4,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
-import { ModelSelect, modelListMessage } from "@/components/model-select";
+import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
@@ -62,7 +62,7 @@ export default function App() {
   const [projectSkills, setProjectSkills] = useState<ProjectSkill[]>([]);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [skillIndex, setSkillIndex] = useState(0);
-  const modelWrite = useRef(Promise.resolve());
+  const composerWrite = useRef(Promise.resolve());
   const focusId = useRef<string | null>(null);
   const busyRef = useRef(new Set<string>());
   const [draft, setDraft] = useState<{ sessionId: string; text: string } | null>(null);
@@ -197,16 +197,52 @@ export default function App() {
     setSkillIndex(0);
   }, [slashQuery]);
 
+  const queueComposer = (write: () => Promise<void>) => {
+    composerWrite.current = composerWrite.current
+      .catch(() => undefined)
+      .then(write)
+      .catch((e) => setError(String(e)))
+      .then(() => undefined);
+  };
+
   const chooseModel = (model: string | null) => {
     if (!active) return;
     const id = active.id;
     setActive((current) => (current && current.id === id ? { ...current, model } : current));
-    modelWrite.current = api
-      .setSessionModel(id, model)
-      .then((session) => {
-        setActive((current) => (current && current.id === id ? { ...current, model: session.model } : current));
-      })
-      .catch((e) => setError(String(e)));
+    queueComposer(async () => {
+      const session = await api.setSessionModel(id, model);
+      setActive((current) => {
+        if (!current || current.id !== id || current.model !== model) return current;
+        return { ...current, model: session.model };
+      });
+    });
+  };
+
+  const chooseEffort = (effort: string | null) => {
+    if (!active) return;
+    const id = active.id;
+    const next = normalizeEffort(effort);
+    setActive((current) => (current && current.id === id ? { ...current, effort: next } : current));
+    queueComposer(async () => {
+      const session = await api.setSessionEffort(id, next);
+      setActive((current) => {
+        if (!current || current.id !== id || normalizeEffort(current.effort) !== next) return current;
+        return { ...current, effort: session.effort };
+      });
+    });
+  };
+
+  const chooseFastMode = (fastMode: boolean) => {
+    if (!active) return;
+    const id = active.id;
+    setActive((current) => (current && current.id === id ? { ...current, fastMode } : current));
+    queueComposer(async () => {
+      const session = await api.setSessionFastMode(id, fastMode);
+      setActive((current) => {
+        if (!current || current.id !== id || current.fastMode !== fastMode) return current;
+        return { ...current, fastMode: session.fastMode };
+      });
+    });
   };
 
   const pickSkill = (next: ProjectSkill) => {
@@ -235,12 +271,14 @@ export default function App() {
       text: chosen ? (text ? `/${chosen.name}\n${text}` : `/${chosen.name}`) : text,
     });
     try {
-      await modelWrite.current;
+      await composerWrite.current;
       const res = await api.sendMessage({
         sessionId,
         prompt: text,
         cwd: active.cwd,
         model: active.model,
+        effort: normalizeEffort(active.effort),
+        fastMode: active.fastMode,
         allowedToolsPreset: active.allowedToolsPreset,
         skill: chosen?.name ?? null,
       });
@@ -571,7 +609,7 @@ export default function App() {
               {readyHint && !error && (
                 <p className="mb-2 text-[13px] text-destructive">{t("setupHint", { hint: readyHint })}</p>
               )}
-              <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2">
+              <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-2">
                 <label htmlFor="composer-model" className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
                   {t("modelOptional")}
                 </label>
@@ -583,7 +621,29 @@ export default function App() {
                   className="h-8 w-[220px] rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                   onChange={chooseModel}
                 />
+                <label htmlFor="composer-effort" className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {t("effort")}
+                </label>
+                <EffortSelect
+                  id="composer-effort"
+                  value={active?.effort ?? null}
+                  disabled={!active || sessionBusy}
+                  className="h-8 w-[148px] rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                  onChange={chooseEffort}
+                />
+                <label htmlFor="composer-fast-mode" className="inline-flex items-center gap-2 text-[12px] text-muted-foreground">
+                  <input
+                    id="composer-fast-mode"
+                    type="checkbox"
+                    className="size-3.5 accent-primary disabled:opacity-50"
+                    checked={!!active?.fastMode}
+                    disabled={!active || sessionBusy}
+                    onChange={(e) => chooseFastMode(e.target.checked)}
+                  />
+                  {t("fastMode")}
+                </label>
                 <p className="text-[11px] text-muted-foreground">{t("modelHint")}</p>
+                <p className="text-[11px] text-muted-foreground">{t("effortHint")}</p>
               </div>
               {active && modelListMessage(catalog, t) && (
                 <p className="mx-auto mb-2 max-w-3xl text-[11px] text-muted-foreground">{modelListMessage(catalog, t)}</p>

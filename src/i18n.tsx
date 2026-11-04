@@ -131,6 +131,15 @@ const en = {
   costBreakdown: "Session costs",
   costBreakdownHint: "Sum of the costs Claude reported for chats in this app.",
   noSessionCost: "No cost yet",
+  effort: "Effort",
+  effortDefault: "Default",
+  effortLow: "Low",
+  effortMedium: "Medium",
+  effortHigh: "High",
+  effortXhigh: "Extra high",
+  effortMax: "Max",
+  effortHint: "This message's reasoning effort. Default omits --effort.",
+  fastMode: "Fast mode (Opus, costs more)",
 } as const;
 
 type Key = keyof typeof en;
@@ -238,6 +247,15 @@ const ko: Dict = {
   costBreakdown: "세션별 비용",
   costBreakdownHint: "이 앱의 채팅에서 Claude가 보고한 비용을 합친 값입니다.",
   noSessionCost: "아직 비용 없음",
+  effort: "추론 노력",
+  effortDefault: "기본값",
+  effortLow: "낮음",
+  effortMedium: "보통",
+  effortHigh: "높음",
+  effortXhigh: "매우 높음",
+  effortMax: "최대",
+  effortHint: "이 메시지의 추론 노력입니다. 기본값은 --effort를 넣지 않습니다.",
+  fastMode: "빠른 모드 (Opus, 비용이 더 듦)",
 };
 
 const ja: Dict = {
@@ -342,6 +360,15 @@ const ja: Dict = {
   costBreakdown: "セッション別の費用",
   costBreakdownHint: "このアプリのチャットで Claude が報告した費用の合計です。",
   noSessionCost: "まだ費用なし",
+  effort: "推論エフォート",
+  effortDefault: "既定",
+  effortLow: "低",
+  effortMedium: "中",
+  effortHigh: "高",
+  effortXhigh: "超高",
+  effortMax: "最大",
+  effortHint: "このメッセージの推論エフォートです。既定では --effort を付けません。",
+  fastMode: "高速モード（Opus、費用が増えます）",
 };
 
 const zh: Dict = {
@@ -445,6 +472,15 @@ const zh: Dict = {
   costBreakdown: "各会话费用",
   costBreakdownHint: "本应用中 Claude 为各聊天报告的费用合计。",
   noSessionCost: "尚无费用",
+  effort: "推理强度",
+  effortDefault: "默认",
+  effortLow: "低",
+  effortMedium: "中",
+  effortHigh: "高",
+  effortXhigh: "极高",
+  effortMax: "最大",
+  effortHint: "这条消息的推理强度。默认不传 --effort。",
+  fastMode: "快速模式（Opus，费用更高）",
 };
 
 const es: Dict = {
@@ -549,6 +585,15 @@ const es: Dict = {
   costBreakdown: "Coste por sesión",
   costBreakdownHint: "Suma de los costes que Claude informó en los chats de esta app.",
   noSessionCost: "Aún sin coste",
+  effort: "Esfuerzo",
+  effortDefault: "Predeterminado",
+  effortLow: "Bajo",
+  effortMedium: "Medio",
+  effortHigh: "Alto",
+  effortXhigh: "Extra alto",
+  effortMax: "Máximo",
+  effortHint: "Esfuerzo de razonamiento de este mensaje. El predeterminado omite --effort.",
+  fastMode: "Modo rápido (Opus, cuesta más)",
 };
 
 const DICTS: Record<Locale, Dict> = { en, ko, ja, zh, es };

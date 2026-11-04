@@ -66,6 +66,12 @@ pub struct GuiSession {
     pub cwd: String,
     pub title: String,
     pub model: Option<String>,
+    /// Reasoning effort for this chat. `None` omits `--effort` on `claude -p`.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Fast mode for this chat. `false` omits `--settings` on `claude -p`.
+    #[serde(default)]
+    pub fast_mode: bool,
     pub allowed_tools_preset: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -129,6 +135,12 @@ pub struct SendMessageRequest {
     pub prompt: String,
     pub cwd: Option<String>,
     pub model: Option<String>,
+    /// `None` or an unknown level omits `--effort` for this turn only.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// `true` passes inline `--settings {"fastMode": true}` for this turn only.
+    #[serde(default)]
+    pub fast_mode: bool,
     pub allowed_tools_preset: Option<String>,
     /// Project skill to invoke for this send only. Empty means no skill.
     #[serde(default)]
