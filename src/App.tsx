@@ -1,17 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
-import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
+import { conversationText, folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
+import { SessionCostsDialog } from "@/components/session-costs-dialog";
 import { SettingsView } from "@/components/settings-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { LanguageSelect, useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
-import type { AppSettings, ClaudeDetectResult, GuiSession, KeyStatus, SessionSummary } from "@/types";
+import type {
+  AppSettings,
+  ClaudeDetectResult,
+  GuiSession,
+  KeyStatus,
+  SessionCostReport,
+  SessionSummary,
+  WorkspaceSpend,
+} from "@/types";
 
 type View = "chat" | "settings";
 
@@ -21,15 +30,39 @@ const DEFAULT_SETTINGS: AppSettings = {
   model: null,
   timeoutSecs: 1800,
   allowedToolsPreset: "read",
+  workspaceId: null,
 };
 
-function PrintModeWarning() {
+function EntryNotices() {
   const { t } = useI18n();
   return (
-    <p className="border-b border-amber-900/70 bg-amber-950/40 px-4 py-2 text-[12.5px] leading-snug text-amber-100/90">
-      {t("printModeWarning")}
-    </p>
+    <div className="border-b border-amber-900/70 bg-amber-950/40 text-[12.5px] leading-snug text-amber-100/90">
+      <p className="px-4 py-2">{t("printModeWarning")}</p>
+      <p className="border-t border-amber-900/50 px-4 py-2">{t("communityNotice")}</p>
+    </div>
   );
+}
+
+function SpendFigure({ spend }: { spend: WorkspaceSpend | null }) {
+  const { t } = useI18n();
+  if (!spend || spend.state === "hidden") return null;
+  if (spend.state === "ok" && spend.amountUsd != null) {
+    return (
+      <div className="mt-1">
+        <p className="font-mono text-[11px] text-primary">
+          {t("monthSpend", { cost: formatUsd(spend.amountUsd) })}
+        </p>
+        <p className="text-[10px] leading-snug text-muted-foreground">{t("spendNotCredit")}</p>
+      </div>
+    );
+  }
+  const message =
+    spend.errorCode === "unauthorized"
+      ? t("spendUnauthorized")
+      : spend.errorCode === "bad_request"
+        ? t("spendBadRequest")
+        : t("spendFailed");
+  return <p className="mt-1 text-[11px] leading-snug text-destructive">{message}</p>;
 }
 
 export default function App() {
@@ -37,6 +70,11 @@ export default function App() {
   const [view, setView] = useState<View>("chat");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [keyStatus, setKeyStatus] = useState<KeyStatus>({ configured: false, masked: null });
+  const [adminKeyStatus, setAdminKeyStatus] = useState<KeyStatus>({ configured: false, masked: null });
+  const [spend, setSpend] = useState<WorkspaceSpend | null>(null);
+  const [costReport, setCostReport] = useState<SessionCostReport | null>(null);
+  const [showCosts, setShowCosts] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [detect, setDetect] = useState<ClaudeDetectResult | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [active, setActive] = useState<GuiSession | null>(null);
@@ -53,24 +91,37 @@ export default function App() {
     setSessions(await api.listSessions());
   }, []);
 
+  const refreshMoney = useCallback(async () => {
+    const [report, month] = await Promise.all([api.sessionCosts(), api.getWorkspaceSpend()]);
+    setCostReport(report);
+    setSpend(month);
+  }, []);
+
   const bootstrap = useCallback(async () => {
     try {
-      const [s, k, d] = await Promise.all([
+      const [s, k, admin, d] = await Promise.all([
         api.getSettings(),
         api.getKeyStatus(),
+        api.getAdminKeyStatus(),
         api.detectClaude(),
       ]);
       setSettings(s);
       setKeyStatus(k);
+      setAdminKeyStatus(admin);
       setDetect(d);
       await refreshSessions();
+      try {
+        await refreshMoney();
+      } catch {
+        setSpend({ state: "error", amountUsd: null, errorCode: "failed" });
+      }
       if (!k.configured || !d.found) setView("settings");
     } catch (e) {
       setError(String(e));
     } finally {
       setBootstrapped(true);
     }
-  }, [refreshSessions]);
+  }, [refreshMoney, refreshSessions]);
 
   useEffect(() => {
     void bootstrap();
@@ -110,6 +161,11 @@ export default function App() {
       setActive(res.session);
       setDraftUser(null);
       await refreshSessions();
+      try {
+        await refreshMoney();
+      } catch {
+        // The reply is already on screen. Cost totals can refresh later.
+      }
     } catch (e) {
       setError(String(e));
       setPrompt(text);
@@ -269,21 +325,27 @@ export default function App() {
           )}
         </div>
         <footer className="border-t border-border px-3 py-2">
-          <p className="font-mono text-[11px] text-primary">
-            {costThisSession != null
-              ? t("sessionCost", { cost: formatUsd(costThisSession) })
-              : t("noTurnCostYet")}
-          </p>
+          <button
+            type="button"
+            className="text-left font-mono text-[11px] text-primary hover:underline"
+            onClick={() => setShowCosts(true)}
+          >
+            {t("allSessionsCost", {
+              cost: costReport?.totalUsd != null ? formatUsd(costReport.totalUsd) : "—",
+            })}
+          </button>
+          <SpendFigure spend={spend} />
           <p className="mt-1 text-[11px] leading-snug text-muted-foreground">{t("balanceNote")}</p>
         </footer>
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <PrintModeWarning />
+        <EntryNotices />
         {view === "settings" ? (
           <SettingsView
             settings={settings}
             keyStatus={keyStatus}
+            adminKeyStatus={adminKeyStatus}
             detect={detect}
             onClose={() => setView("chat")}
             onSaved={async () => {
@@ -292,6 +354,12 @@ export default function App() {
             }}
             onSettings={setSettings}
             onKeyStatus={setKeyStatus}
+            onAdminKeyStatus={setAdminKeyStatus}
+            onAdminChanged={() => {
+              void refreshMoney().catch(() => {
+                setSpend({ state: "error", amountUsd: null, errorCode: "failed" });
+              });
+            }}
             onDetect={setDetect}
           />
         ) : (
@@ -304,13 +372,34 @@ export default function App() {
                     {active.cwd}
                     {" · "}
                     {active.cliSessionId ? t("resumeReady") : t("newSession")}
-                    {costThisSession != null
-                      ? ` · ${t("sessionCost", { cost: formatUsd(costThisSession) })}`
-                      : ""}
                   </p>
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
+                {active && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={active.turns.length === 0}
+                    onClick={() => {
+                      void navigator.clipboard
+                        .writeText(
+                          conversationText(active, {
+                            user: t("you"),
+                            assistant: t("assistantName"),
+                            error: t("roleError"),
+                          }),
+                        )
+                        .then(() => {
+                          setCopied(true);
+                          window.setTimeout(() => setCopied(false), 1600);
+                        })
+                        .catch(() => setError(t("copyFailed")));
+                    }}
+                  >
+                    {copied ? t("copiedChat") : t("copyChat")}
+                  </Button>
+                )}
                 <Badge className={keyStatus.configured && detect?.found ? "text-primary" : "text-amber-200"}>
                   {keyStatus.configured ? t("keyOk") : t("noKey")}
                   {" · "}
@@ -365,6 +454,41 @@ export default function App() {
                 void handleSend();
               }}
             >
+              {active && (
+                <div className="mx-auto mb-2 max-w-3xl">
+                  <p className="font-mono text-[11px] text-primary">
+                    {costThisSession != null
+                      ? t("sessionCost", { cost: formatUsd(costThisSession) })
+                      : t("noTurnCostYet")}
+                  </p>
+                  <div className="min-[821px]:hidden">
+                    <SpendFigure spend={spend} />
+                    <button
+                      type="button"
+                      className="mt-1 text-left font-mono text-[11px] text-primary hover:underline"
+                      onClick={() => setShowCosts(true)}
+                    >
+                      {t("allSessionsCost", {
+                        cost: costReport?.totalUsd != null ? formatUsd(costReport.totalUsd) : "—",
+                      })}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {!active && (
+                <div className="mx-auto mb-2 max-w-3xl min-[821px]:hidden">
+                  <SpendFigure spend={spend} />
+                  <button
+                    type="button"
+                    className="text-left font-mono text-[11px] text-primary hover:underline"
+                    onClick={() => setShowCosts(true)}
+                  >
+                    {t("allSessionsCost", {
+                      cost: costReport?.totalUsd != null ? formatUsd(costReport.totalUsd) : "—",
+                    })}
+                  </button>
+                </div>
+              )}
               {error && <p className="mb-2 text-[13px] text-destructive">{error}</p>}
               {readyHint && !error && (
                 <p className="mb-2 text-[13px] text-destructive">{t("setupHint", { hint: readyHint })}</p>
@@ -430,6 +554,15 @@ export default function App() {
         open={showDiscover}
         onOpenChange={setShowDiscover}
         onOpenSession={openDiscovered}
+      />
+      <SessionCostsDialog
+        open={showCosts}
+        report={costReport}
+        onOpenChange={setShowCosts}
+        onOpenSession={(id) => {
+          setShowCosts(false);
+          void selectSession(id);
+        }}
       />
     </div>
   );

@@ -7,6 +7,8 @@ export interface AppSettings {
   model: string | null;
   timeoutSecs: number;
   allowedToolsPreset: string;
+  /** Anthropic workspace id for the Admin cost report. Not a secret. */
+  workspaceId?: string | null;
 }
 
 export interface GuiTurn {
@@ -55,6 +57,25 @@ export interface ClaudeDetectResult {
 export interface KeyStatus {
   configured: boolean;
   masked: string | null;
+}
+
+export interface WorkspaceSpend {
+  state: "hidden" | "ok" | "error";
+  amountUsd: number | null;
+  errorCode: "unauthorized" | "bad_request" | "failed" | null;
+}
+
+export interface SessionCostLine {
+  id: string;
+  title: string;
+  cwd: string;
+  updatedAt: string;
+  costUsd: number | null;
+}
+
+export interface SessionCostReport {
+  totalUsd: number | null;
+  sessions: SessionCostLine[];
 }
 
 export interface ConnectionTestResult {

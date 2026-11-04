@@ -1,4 +1,5 @@
 mod cli;
+mod cost;
 mod discover;
 mod models;
 mod secrets;
@@ -28,7 +29,8 @@ fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<AppSettings, String> {
+fn save_settings(state: State<'_, AppState>, mut settings: AppSettings) -> Result<AppSettings, String> {
+    settings.workspace_id = normalize_workspace_id(settings.workspace_id)?;
     state.store.save_settings(&settings).map_err(err)?;
     Ok(settings)
 }
@@ -60,6 +62,77 @@ fn delete_api_key() -> Result<KeyStatus, String> {
     Ok(KeyStatus {
         configured: false,
         masked: None,
+    })
+}
+
+#[tauri::command]
+fn get_admin_key_status() -> Result<KeyStatus, String> {
+    match secrets::load_admin_api_key() {
+        Ok(Some(key)) => Ok(KeyStatus {
+            configured: true,
+            masked: Some(secrets::mask_key(&key)),
+        }),
+        Ok(None) => Ok(KeyStatus {
+            configured: false,
+            masked: None,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn save_admin_api_key(key: String) -> Result<KeyStatus, String> {
+    secrets::save_admin_api_key(&key).map_err(err)?;
+    get_admin_key_status()
+}
+
+#[tauri::command]
+fn delete_admin_api_key() -> Result<KeyStatus, String> {
+    secrets::delete_admin_api_key().map_err(err)?;
+    Ok(KeyStatus {
+        configured: false,
+        masked: None,
+    })
+}
+
+#[tauri::command]
+async fn get_workspace_spend(state: State<'_, AppState>) -> Result<cost::WorkspaceSpend, String> {
+    let settings = state.store.load_settings().map_err(err)?;
+    let workspace = settings
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let key = secrets::load_admin_api_key().map_err(err)?;
+    match (key, workspace) {
+        (Some(key), Some(workspace)) => Ok(cost::fetch_month_spend(&key, workspace).await),
+        _ => Ok(cost::WorkspaceSpend::hidden()),
+    }
+}
+
+#[tauri::command]
+fn session_costs(state: State<'_, AppState>) -> Result<SessionCostReport, String> {
+    let sessions = state.store.load_sessions().map_err(err)?;
+    let mut lines = Vec::with_capacity(sessions.len());
+    let mut total = 0.0;
+    let mut any = false;
+    for session in sessions {
+        let cost_usd = session_cost_usd(&session);
+        if let Some(cost) = cost_usd {
+            total += cost;
+            any = true;
+        }
+        lines.push(SessionCostLine {
+            id: session.id,
+            title: session.title,
+            cwd: session.cwd,
+            updated_at: session.updated_at,
+            cost_usd,
+        });
+    }
+    Ok(SessionCostReport {
+        total_usd: if any { Some(total) } else { None },
+        sessions: lines,
     })
 }
 
@@ -482,12 +555,58 @@ fn truncate(s: &str, max: usize) -> String {
 fn redact_secrets(s: &str) -> String {
     // Avoid echoing anything that looks like an API key in error panels.
     let mut out = s.to_string();
-    if let Ok(Some(key)) = secrets::load_api_key() {
-        if !key.is_empty() {
-            out = out.replace(&key, "[REDACTED]");
+    for key in [secrets::load_api_key(), secrets::load_admin_api_key()] {
+        if let Ok(Some(key)) = key {
+            if !key.is_empty() {
+                out = out.replace(&key, "[REDACTED]");
+            }
         }
     }
     out
+}
+
+fn normalize_workspace_id(raw: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > 128
+        || trimmed
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err("Workspace ID is invalid.".into());
+    }
+    if trimmed.starts_with("sk-ant") {
+        return Err("Workspace ID is not an API key.".into());
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn turn_cost_usd(turn: &GuiTurn) -> Option<f64> {
+    if let Some(cost) = turn.cost_usd {
+        if cost.is_finite() {
+            return Some(cost);
+        }
+    }
+    cli::envelope_if_whole_document(&turn.content)
+        .and_then(|env| env.total_cost_usd)
+        .filter(|cost| cost.is_finite())
+}
+
+fn session_cost_usd(session: &GuiSession) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut any = false;
+    for turn in &session.turns {
+        if let Some(cost) = turn_cost_usd(turn) {
+            sum += cost;
+            any = true;
+        }
+    }
+    if any && sum.is_finite() { Some(sum) } else { None }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -505,6 +624,11 @@ pub fn run() {
             get_key_status,
             save_api_key,
             delete_api_key,
+            get_admin_key_status,
+            save_admin_api_key,
+            delete_admin_api_key,
+            get_workspace_spend,
+            session_costs,
             detect_claude,
             list_sessions,
             get_session,

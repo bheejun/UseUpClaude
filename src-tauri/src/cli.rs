@@ -150,9 +150,15 @@ pub async fn run_claude_managed(
         }
     }
 
-    if let Some(key) = spec.api_key {
-        cmd.env("ANTHROPIC_API_KEY", key);
-    } else if let Ok(Some(key)) = secrets::load_api_key() {
+    // Chat key only. The Admin key lives in a different keychain account and is never read here.
+    let chat_key = match spec.api_key {
+        Some(key) => cli_key_from_raw(Some(key))?,
+        None => match secrets::load_api_key().map_err(|e| CliError::Message(e.to_string()))? {
+            Some(key) => cli_key_from_raw(Some(&key))?,
+            None => None,
+        },
+    };
+    if let Some(key) = chat_key {
         cmd.env("ANTHROPIC_API_KEY", key);
     }
 
@@ -445,6 +451,23 @@ fn fallback_message(exit_code: i32, stdout: &str, stderr: &str) -> String {
     }
 }
 
+/// Accept a chat API key for the child environment. Admin keys are refused.
+pub(crate) fn cli_key_from_raw(raw: Option<&str>) -> Result<Option<String>, CliError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if secrets::is_admin_api_key(trimmed) {
+        return Err(CliError::Message(
+            "Admin API keys are not sent to claude -p. Save an sk-ant-api key for chat.".into(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 pub async fn cancel_run(active: &ActiveRun) -> Result<(), CliError> {
     active.cancel_flag.store(true, Ordering::SeqCst);
     if let Some(mut c) = active.child.lock().await.take() {
@@ -530,6 +553,22 @@ mod tests {
         assert!(envelope_if_whole_document(prose).is_none());
         let env = interpret_cli_text(prose).expect("stdout scan");
         assert_eq!(env.result_text, "x");
+    }
+
+    #[test]
+    fn admin_key_is_never_accepted_for_the_cli() {
+        let err = cli_key_from_raw(Some("sk-ant-admin01-example")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not sent"));
+        assert!(!message.contains("example"));
+        assert_eq!(
+            cli_key_from_raw(Some("  sk-ant-api03-example  "))
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant-api03-example")
+        );
+        assert!(cli_key_from_raw(Some("   ")).unwrap().is_none());
+        assert!(cli_key_from_raw(None).unwrap().is_none());
     }
 
     #[test]

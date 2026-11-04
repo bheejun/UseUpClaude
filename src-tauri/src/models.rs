@@ -11,6 +11,9 @@ pub struct AppSettings {
     pub timeout_secs: u64,
     /// MVP default: read-only safer tools
     pub allowed_tools_preset: String,
+    /// Anthropic workspace id for the Admin cost report. Not a secret.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -21,6 +24,7 @@ impl Default for AppSettings {
             model: None,
             timeout_secs: 1800,
             allowed_tools_preset: "read".into(),
+            workspace_id: None,
         }
     }
 }
@@ -150,6 +154,23 @@ pub struct DiscoveredProject {
     pub cwd: Option<String>,
     pub label: String,
     pub sessions: Vec<DiscoveredSession>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCostLine {
+    pub id: Uuid,
+    pub title: String,
+    pub cwd: String,
+    pub updated_at: DateTime<Utc>,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCostReport {
+    pub total_usd: Option<f64>,
+    pub sessions: Vec<SessionCostLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
