@@ -389,6 +389,7 @@ async fn send_message(
         finished_at: Some(now),
         status: TurnStatus::Done,
         cost_usd: None,
+        events: Vec::new(),
     };
     session.turns.push(user_turn);
 
@@ -401,6 +402,7 @@ async fn send_message(
         finished_at: None,
         status: TurnStatus::Pending,
         cost_usd: None,
+        events: Vec::new(),
     };
     let pending_id = pending.id;
     session.turns.push(pending);
@@ -469,6 +471,14 @@ async fn send_message(
             turn.content = content;
             // CLI total_cost_usd is the running session total. Keep this turn's increase.
             turn.cost_usd = incremental_turn_cost(out.total_cost_usd, prior);
+            turn.events = out
+                .events
+                .into_iter()
+                .map(|mut event| {
+                    event.preview = redact_secrets(&event.preview);
+                    event
+                })
+                .collect();
             turn.exit_code = Some(out.exit_code);
             turn.finished_at = Some(Utc::now());
 
@@ -770,6 +780,7 @@ mod tests {
             finished_at: Some(now),
             status: TurnStatus::Done,
             cost_usd: cost,
+            events: Vec::new(),
         }
     }
 
@@ -806,6 +817,16 @@ mod tests {
         assert!(last < 1.0);
         assert!(!normalize_stored_turn_costs(&mut session));
         assert!((session_cost_usd(&session).unwrap() - sum).abs() < 1e-12);
+    }
+
+    #[test]
+    fn old_turn_json_without_events_loads() {
+        let raw = r#"{"id":"11111111-1111-1111-1111-111111111111","role":"assistant","content":"hi","exitCode":0,"startedAt":"2026-01-01T00:00:00Z","finishedAt":"2026-01-01T00:00:00Z","status":"done","costUsd":0.1}"#;
+        let turn: GuiTurn = serde_json::from_str(raw).unwrap();
+        assert!(turn.events.is_empty());
+        assert_eq!(turn.content, "hi");
+        let saved = serde_json::to_value(&turn).unwrap();
+        assert!(saved["events"].as_array().unwrap().is_empty());
     }
 
     #[test]
