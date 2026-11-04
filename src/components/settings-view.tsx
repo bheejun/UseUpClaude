@@ -11,34 +11,27 @@ import type { AppSettings, ClaudeDetectResult, KeyStatus, ModelCatalog } from "@
 export function SettingsView({
   settings,
   keyStatus,
-  adminKeyStatus,
   catalog,
   detect,
   onClose,
   onSaved,
   onSettings,
   onKeyStatus,
-  onAdminKeyStatus,
-  onAdminChanged,
   onDetect,
 }: {
   settings: AppSettings;
   keyStatus: KeyStatus;
-  adminKeyStatus: KeyStatus;
   catalog: ModelCatalog;
   detect: ClaudeDetectResult | null;
   onClose: () => void;
   onSaved: () => Promise<void>;
   onSettings: (s: AppSettings) => void;
   onKeyStatus: (k: KeyStatus) => void;
-  onAdminKeyStatus: (k: KeyStatus) => void;
-  onAdminChanged: () => void;
   onDetect: (d: ClaudeDetectResult) => void;
 }) {
   const { t } = useI18n();
   const [draft, setDraft] = useState(settings);
   const [keyInput, setKeyInput] = useState("");
-  const [adminKeyInput, setAdminKeyInput] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [statusKind, setStatusKind] = useState<"ok" | "error" | null>(null);
   const [busy, setBusy] = useState(false);
@@ -180,86 +173,6 @@ export function SettingsView({
             </div>
             <p className="text-[12px] text-muted-foreground">{t("chatKeyHint")}</p>
             <p className="text-[12px] text-muted-foreground">{t("balanceNote")}</p>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="admin-api-key">{t("adminApiKey")}</Label>
-            <Input
-              id="admin-api-key"
-              type="password"
-              value={adminKeyInput}
-              autoComplete="off"
-              onChange={(e) => setAdminKeyInput(e.target.value)}
-              placeholder={
-                adminKeyStatus.configured
-                  ? t("adminApiKeySaved", { mask: adminKeyStatus.masked ?? "" })
-                  : t("adminApiKeyEmpty")
-              }
-            />
-            <div className="flex flex-wrap gap-2">
-              <Button
-                disabled={!adminKeyInput.trim() || busy}
-                onClick={() => {
-                  const next = adminKeyInput.trim();
-                  if (!next.startsWith("sk-ant-admin")) {
-                    setStatus(t("adminKeyExpected"));
-                    setStatusKind("error");
-                    return;
-                  }
-                  setBusy(true);
-                  void api
-                    .saveAdminApiKey(next)
-                    .then((k) => {
-                      onAdminKeyStatus(k);
-                      setAdminKeyInput("");
-                      setStatus(t("adminKeySaved"));
-                      setStatusKind("ok");
-                      onAdminChanged();
-                    })
-                    .catch((e) => {
-                      setStatus(String(e));
-                      setStatusKind("error");
-                    })
-                    .finally(() => setBusy(false));
-                }}
-              >
-                {t("saveAdminKey")}
-              </Button>
-              <Button
-                variant="destructive"
-                disabled={!adminKeyStatus.configured || busy}
-                onClick={() => {
-                  setBusy(true);
-                  void api
-                    .deleteAdminApiKey()
-                    .then((k) => {
-                      onAdminKeyStatus(k);
-                      setStatus(t("adminKeyDeleted"));
-                      setStatusKind("ok");
-                      onAdminChanged();
-                    })
-                    .catch((e) => {
-                      setStatus(String(e));
-                      setStatusKind("error");
-                    })
-                    .finally(() => setBusy(false));
-                }}
-              >
-                {t("deleteAdminKey")}
-              </Button>
-            </div>
-            <p className="text-[12px] text-muted-foreground">{t("adminKeyHint")}</p>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="workspace-id">{t("workspaceId")}</Label>
-            <Input
-              id="workspace-id"
-              className="font-mono text-xs"
-              value={draft.workspaceId ?? ""}
-              autoComplete="off"
-              placeholder={t("workspaceIdPlaceholder")}
-              onChange={(e) => setDraft({ ...draft, workspaceId: e.target.value || null })}
-            />
-            <p className="text-[12px] text-muted-foreground">{t("workspaceIdHint")}</p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="binary">{t("binaryPath")}</Label>

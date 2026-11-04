@@ -20,7 +20,6 @@ import type {
   ModelCatalog,
   SessionCostReport,
   SessionSummary,
-  WorkspaceSpend,
 } from "@/types";
 
 type View = "chat" | "settings";
@@ -31,7 +30,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   model: null,
   timeoutSecs: 1800,
   allowedToolsPreset: "read",
-  workspaceId: null,
 };
 
 function EntryNotices() {
@@ -44,35 +42,11 @@ function EntryNotices() {
   );
 }
 
-function SpendFigure({ spend }: { spend: WorkspaceSpend | null }) {
-  const { t } = useI18n();
-  if (!spend || spend.state === "hidden") return null;
-  if (spend.state === "ok" && spend.amountUsd != null) {
-    return (
-      <div className="mt-1">
-        <p className="font-mono text-[11px] text-primary">
-          {t("monthSpend", { cost: formatUsd(spend.amountUsd) })}
-        </p>
-        <p className="text-[10px] leading-snug text-muted-foreground">{t("spendNotCredit")}</p>
-      </div>
-    );
-  }
-  const message =
-    spend.errorCode === "unauthorized"
-      ? t("spendUnauthorized")
-      : spend.errorCode === "bad_request"
-        ? t("spendBadRequest")
-        : t("spendFailed");
-  return <p className="mt-1 text-[11px] leading-snug text-destructive">{message}</p>;
-}
-
 export default function App() {
   const { t } = useI18n();
   const [view, setView] = useState<View>("chat");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [keyStatus, setKeyStatus] = useState<KeyStatus>({ configured: false, masked: null });
-  const [adminKeyStatus, setAdminKeyStatus] = useState<KeyStatus>({ configured: false, masked: null });
-  const [spend, setSpend] = useState<WorkspaceSpend | null>(null);
   const [costReport, setCostReport] = useState<SessionCostReport | null>(null);
   const [showCosts, setShowCosts] = useState(false);
   const [catalog, setCatalog] = useState<ModelCatalog>({ models: [], errorCode: null });
@@ -93,9 +67,7 @@ export default function App() {
   }, []);
 
   const refreshMoney = useCallback(async () => {
-    const [report, month] = await Promise.all([api.sessionCosts(), api.getWorkspaceSpend()]);
-    setCostReport(report);
-    setSpend(month);
+    setCostReport(await api.sessionCosts());
   }, []);
 
   const refreshModels = useCallback(async () => {
@@ -108,21 +80,19 @@ export default function App() {
 
   const bootstrap = useCallback(async () => {
     try {
-      const [s, k, admin, d] = await Promise.all([
+      const [s, k, d] = await Promise.all([
         api.getSettings(),
         api.getKeyStatus(),
-        api.getAdminKeyStatus(),
         api.detectClaude(),
       ]);
       setSettings(s);
       setKeyStatus(k);
-      setAdminKeyStatus(admin);
       setDetect(d);
       await refreshSessions();
       try {
         await refreshMoney();
       } catch {
-        setSpend({ state: "error", amountUsd: null, errorCode: "failed" });
+        // Session costs can refresh later.
       }
       await refreshModels();
       if (!k.configured || !d.found) setView("settings");
@@ -346,7 +316,6 @@ export default function App() {
               cost: costReport?.totalUsd != null ? formatUsd(costReport.totalUsd) : "—",
             })}
           </button>
-          <SpendFigure spend={spend} />
           <p className="mt-1 text-[11px] leading-snug text-muted-foreground">{t("balanceNote")}</p>
         </footer>
       </aside>
@@ -357,7 +326,6 @@ export default function App() {
           <SettingsView
             settings={settings}
             keyStatus={keyStatus}
-            adminKeyStatus={adminKeyStatus}
             catalog={catalog}
             detect={detect}
             onClose={() => setView("chat")}
@@ -369,12 +337,6 @@ export default function App() {
             onKeyStatus={(status) => {
               setKeyStatus(status);
               void refreshModels();
-            }}
-            onAdminKeyStatus={setAdminKeyStatus}
-            onAdminChanged={() => {
-              void refreshMoney().catch(() => {
-                setSpend({ state: "error", amountUsd: null, errorCode: "failed" });
-              });
             }}
             onDetect={setDetect}
           />
@@ -454,7 +416,6 @@ export default function App() {
                       : t("noTurnCostYet")}
                   </p>
                   <div className="min-[821px]:hidden">
-                    <SpendFigure spend={spend} />
                     <button
                       type="button"
                       className="mt-1 text-left font-mono text-[11px] text-primary hover:underline"
@@ -469,7 +430,6 @@ export default function App() {
               )}
               {!active && (
                 <div className="mx-auto mb-2 max-w-3xl min-[821px]:hidden">
-                  <SpendFigure spend={spend} />
                   <button
                     type="button"
                     className="text-left font-mono text-[11px] text-primary hover:underline"

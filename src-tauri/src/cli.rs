@@ -91,14 +91,54 @@ pub async fn detect_claude(override_path: Option<&str>) -> ClaudeDetectResult {
     }
 }
 
-/// Map MVP preset → Claude CLI `--allowedTools` args.
-pub fn allowed_tools_args(preset: &str) -> Vec<String> {
+/// Map a session tool preset onto `claude -p` permission flags.
+///
+/// Project skills load from the session cwd. `Skill` is pre-approved so one can
+/// start, and its later tool calls still have to pass this same mode. Read-only
+/// never includes Edit, Write, Bash, or a permissions bypass. Nothing here passes
+/// `--safe-mode` or `--disable-slash-commands`.
+pub fn permission_args(preset: &str) -> Vec<String> {
     match preset {
-        "read" | "readonly" => vec!["--allowedTools".into(), "Read".into()],
-        "read_edit" => vec!["--allowedTools".into(), "Read,Edit".into()],
-        "full" => vec![],
-        other => vec!["--allowedTools".into(), other.to_string()],
+        "read" | "readonly" => flags(&[
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--allowedTools",
+            "Skill,Read,Grep,Glob",
+        ]),
+        "read_edit" => flags(&[
+            "--permission-mode",
+            "acceptEdits",
+            "--permission-prompts",
+            "none",
+            "--allowedTools",
+            "Skill,Read,Grep,Glob,Edit,Write",
+        ]),
+        "full" => flags(&[
+            "--allow-dangerously-skip-permissions",
+            "--dangerously-skip-permissions",
+            "--permission-mode",
+            "bypassPermissions",
+            "--permission-prompts",
+            "none",
+        ]),
+        other => {
+            let mut args = flags(&[
+                "--permission-mode",
+                "dontAsk",
+                "--permission-prompts",
+                "none",
+                "--allowedTools",
+            ]);
+            args.push(other.to_string());
+            args
+        }
     }
+}
+
+fn flags(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|part| (*part).to_string()).collect()
 }
 
 pub struct RunSpec<'a> {
@@ -138,7 +178,7 @@ pub async fn run_claude_managed(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    for arg in allowed_tools_args(spec.allowed_tools_preset) {
+    for arg in permission_args(spec.allowed_tools_preset) {
         cmd.arg(arg);
     }
     if let Some(id) = spec.resume {
@@ -150,7 +190,7 @@ pub async fn run_claude_managed(
         }
     }
 
-    // Chat key only. The Admin key lives in a different keychain account and is never read here.
+    // Chat key only. An Admin key is refused before it can reach the child env.
     let chat_key = match spec.api_key {
         Some(key) => cli_key_from_raw(Some(key))?,
         None => match secrets::load_api_key().map_err(|e| CliError::Message(e.to_string()))? {
@@ -553,6 +593,49 @@ mod tests {
         assert!(envelope_if_whole_document(prose).is_none());
         let env = interpret_cli_text(prose).expect("stdout scan");
         assert_eq!(env.result_text, "x");
+    }
+
+    fn pair(args: &[String], name: &str, value: &str) -> bool {
+        args.windows(2).any(|item| item[0] == name && item[1] == value)
+    }
+
+    #[test]
+    fn read_only_allows_project_skills_without_writes() {
+        for preset in ["read", "readonly"] {
+            let args = permission_args(preset);
+            assert!(pair(&args, "--permission-mode", "dontAsk"));
+            assert!(pair(&args, "--permission-prompts", "none"));
+            let tools = &args[args.iter().position(|arg| arg == "--allowedTools").unwrap() + 1];
+            for name in ["Skill", "Read", "Grep", "Glob"] {
+                assert!(tools.split(',').any(|tool| tool == name), "{name} missing");
+            }
+            for name in ["Edit", "Write", "Bash", "PowerShell"] {
+                assert!(!tools.split(',').any(|tool| tool == name), "{name} leaked");
+            }
+            assert!(!args.iter().any(|arg| arg.contains("bypass") || arg.contains("dangerously")));
+            assert!(!args.iter().any(|arg| arg == "--safe-mode" || arg == "--disable-slash-commands"));
+        }
+    }
+
+    #[test]
+    fn read_edit_allows_file_edits_and_skills_but_not_shell() {
+        let args = permission_args("read_edit");
+        assert!(pair(&args, "--permission-mode", "acceptEdits"));
+        let tools = &args[args.iter().position(|arg| arg == "--allowedTools").unwrap() + 1];
+        for name in ["Skill", "Read", "Edit", "Write"] {
+            assert!(tools.split(',').any(|tool| tool == name));
+        }
+        assert!(!tools.split(',').any(|tool| tool == "Bash" || tool == "PowerShell"));
+        assert!(!args.iter().any(|arg| arg.contains("bypass") || arg.contains("dangerously")));
+    }
+
+    #[test]
+    fn unrestricted_passes_permission_bypass_without_a_tool_allowlist() {
+        let args = permission_args("full");
+        assert!(pair(&args, "--permission-mode", "bypassPermissions"));
+        assert!(args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(!args.iter().any(|arg| arg == "--allowedTools"));
+        assert!(!args.iter().any(|arg| arg == "--safe-mode" || arg == "--disable-slash-commands"));
     }
 
     #[test]

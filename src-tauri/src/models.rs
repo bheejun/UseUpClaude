@@ -11,9 +11,6 @@ pub struct AppSettings {
     pub timeout_secs: u64,
     /// MVP default: read-only safer tools
     pub allowed_tools_preset: String,
-    /// Anthropic workspace id for the Admin cost report. Not a secret.
-    #[serde(default)]
-    pub workspace_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -24,7 +21,6 @@ impl Default for AppSettings {
             model: None,
             timeout_secs: 1800,
             allowed_tools_preset: "read".into(),
-            workspace_id: None,
         }
     }
 }

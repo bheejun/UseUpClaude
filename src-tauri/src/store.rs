@@ -51,8 +51,16 @@ impl AppStore {
         if !path.exists() {
             return Ok(AppSettings::default());
         }
-        let raw = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&raw)?)
+        let raw = fs::read_to_string(&path)?;
+        let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+        let stripped = value
+            .as_object_mut()
+            .is_some_and(|obj| obj.remove("workspaceId").is_some());
+        let settings = serde_json::from_value(value)?;
+        if stripped {
+            self.save_settings(&settings)?;
+        }
+        Ok(settings)
     }
 
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), StoreError> {

@@ -3,7 +3,8 @@ use thiserror::Error;
 
 const SERVICE: &str = "com.useupclaude.claude-gui";
 const ACCOUNT_API: &str = "anthropic_api_key";
-const ACCOUNT_ADMIN: &str = "anthropic_admin_api_key";
+/// Left behind by the removed Admin cost lookup. Deleted on startup, never read.
+const LEGACY_ADMIN_ACCOUNT: &str = "anthropic_admin_api_key";
 
 #[derive(Debug, Error)]
 pub enum SecretError {
@@ -13,8 +14,6 @@ pub enum SecretError {
     Empty,
     #[error("Admin API keys are not used for claude -p")]
     AdminKeyNotForCli,
-    #[error("Admin API key must start with sk-ant-admin")]
-    NotAdminKey,
 }
 
 fn entry(account: &str) -> Result<Entry, SecretError> {
@@ -68,23 +67,8 @@ pub fn delete_api_key() -> Result<(), SecretError> {
     delete_secret(ACCOUNT_API)
 }
 
-pub fn save_admin_api_key(key: &str) -> Result<(), SecretError> {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return Err(SecretError::Empty);
-    }
-    if !is_admin_api_key(trimmed) {
-        return Err(SecretError::NotAdminKey);
-    }
-    write_secret(ACCOUNT_ADMIN, trimmed)
-}
-
-pub fn load_admin_api_key() -> Result<Option<String>, SecretError> {
-    read_secret(ACCOUNT_ADMIN)
-}
-
-pub fn delete_admin_api_key() -> Result<(), SecretError> {
-    delete_secret(ACCOUNT_ADMIN)
+pub fn forget_admin_api_key() -> Result<(), SecretError> {
+    delete_secret(LEGACY_ADMIN_ACCOUNT)
 }
 
 pub fn mask_key(key: &str) -> String {

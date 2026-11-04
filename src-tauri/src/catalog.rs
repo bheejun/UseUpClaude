@@ -93,12 +93,10 @@ fn push_model(out: &mut Vec<ListedModel>, seen: &mut std::collections::BTreeSet<
 }
 
 /// GET /v1/models with the chat key. The key is a header only, never the URL or a log line.
-/// A saved workspace id is sent only if the first request is rejected for lacking one.
-pub async fn fetch_models(chat_key: &str, workspace_id: Option<&str>) -> ModelCatalog {
+pub async fn fetch_models(chat_key: &str) -> ModelCatalog {
     if crate::secrets::is_admin_api_key(chat_key) {
         return ModelCatalog::no_key();
     }
-    let workspace = workspace_id.map(str::trim).filter(|id| !id.is_empty());
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
@@ -111,18 +109,9 @@ pub async fn fetch_models(chat_key: &str, workspace_id: Option<&str>) -> ModelCa
     let mut models = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut after: Option<String> = None;
-    let mut use_workspace = false;
     for _ in 0..MAX_PAGES {
-        let page = match get_page(&client, chat_key, if use_workspace { workspace } else { None }, after.as_deref()).await {
+        let page = match get_page(&client, chat_key, after.as_deref()).await {
             Ok(page) => page,
-            Err("bad_request") if !use_workspace && workspace.is_some() => {
-                use_workspace = true;
-                match get_page(&client, chat_key, workspace, after.as_deref()).await {
-                    Ok(page) => page,
-                    Err("unauthorized") => return ModelCatalog::error("unauthorized"),
-                    Err(_) => return ModelCatalog::error("failed"),
-                }
-            }
             Err("unauthorized") => return ModelCatalog::error("unauthorized"),
             Err(_) => return ModelCatalog::error("failed"),
         };
@@ -152,7 +141,6 @@ pub async fn fetch_models(chat_key: &str, workspace_id: Option<&str>) -> ModelCa
 async fn get_page(
     client: &reqwest::Client,
     chat_key: &str,
-    workspace_id: Option<&str>,
     after_id: Option<&str>,
 ) -> Result<ModelsPage, &'static str> {
     let mut request = client
@@ -160,9 +148,6 @@ async fn get_page(
         .header("x-api-key", chat_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .query(&[("limit", "100")]);
-    if let Some(workspace_id) = workspace_id {
-        request = request.header("anthropic-workspace-id", workspace_id);
-    }
     if let Some(after_id) = after_id {
         request = request.query(&[("after_id", after_id)]);
     }
