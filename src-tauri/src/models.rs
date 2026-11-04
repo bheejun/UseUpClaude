@@ -126,6 +126,9 @@ pub struct SendMessageRequest {
     pub cwd: Option<String>,
     pub model: Option<String>,
     pub allowed_tools_preset: Option<String>,
+    /// Project skill to invoke for this send only. Empty means no skill.
+    #[serde(default)]
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

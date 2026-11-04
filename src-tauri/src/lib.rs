@@ -3,6 +3,7 @@ mod cli;
 mod discover;
 mod models;
 mod secrets;
+mod skills;
 mod store;
 
 use chrono::Utc;
@@ -107,6 +108,24 @@ fn get_session(state: State<'_, AppState>, id: Uuid) -> Result<GuiSession, Strin
 }
 
 #[tauri::command]
+fn set_session_model(
+    state: State<'_, AppState>,
+    id: Uuid,
+    model: Option<String>,
+) -> Result<GuiSession, String> {
+    let mut session = load_session(&state, id)?;
+    session.model = normalize_model(model);
+    session.updated_at = Utc::now();
+    state.store.save_session(&session).map_err(err)?;
+    Ok(session)
+}
+
+#[tauri::command]
+fn list_project_skills(cwd: String) -> Vec<skills::ProjectSkill> {
+    skills::list_project_skills(std::path::Path::new(&cwd))
+}
+
+#[tauri::command]
 fn delete_session(state: State<'_, AppState>, id: Uuid) -> Result<(), String> {
     state.store.delete_session(id).map_err(err)
 }
@@ -193,7 +212,7 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
             prompt: "Reply with exactly: pong",
             cwd: &cwd,
             resume: None,
-            model: settings.model.as_deref(),
+            model: None,
             allowed_tools_preset: "read",
             timeout_secs: 120,
             api_key: None,
@@ -232,8 +251,14 @@ async fn send_message(
     state: State<'_, AppState>,
     request: SendMessageRequest,
 ) -> Result<SendMessageResponse, String> {
-    let prompt = request.prompt.trim().to_string();
-    if prompt.is_empty() {
+    let typed = request.prompt.trim().to_string();
+    let requested_skill = request
+        .skill
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    if typed.is_empty() && requested_skill.is_none() {
         return Err("Prompt is empty".into());
     }
 
@@ -255,7 +280,7 @@ async fn send_message(
         create_session_inner(
             &state.store,
             cwd,
-            request.model.clone().or(settings.model.clone()),
+            request.model.clone(),
             request
                 .allowed_tools_preset
                 .clone()
@@ -263,6 +288,17 @@ async fn send_message(
         )
         .map_err(err)?
     };
+
+    let cwd = PathBuf::from(&session.cwd);
+    let prompt = match requested_skill.as_deref() {
+        Some(name) if skills::is_skill_name(name) && skills::project_has_skill(&cwd, name) => {
+            skills::compose_prompt(&typed, Some(name))
+        }
+        Some(_) => return Err("That skill is not in this project.".into()),
+        None => typed,
+    };
+    // The composer chooses the model for this chat. Null keeps the CLI default and omits --model.
+    session.model = normalize_model(request.model.clone());
 
     let fresh_gui_chat = session.cli_session_id.is_none()
         && !session
@@ -301,25 +337,13 @@ async fn send_message(
     session.updated_at = Utc::now();
     state.store.save_session(&session).map_err(err)?;
 
-    let cwd = PathBuf::from(&session.cwd);
     if !cwd.is_dir() {
         let msg = format!("cwd does not exist: {}", session.cwd);
         return fail_pending(&state, session, pending_id, msg, None);
     }
 
     let resume = session.cli_session_id.clone();
-    // Existing chats keep the model stored on the session. Null means CLI default, so --model is omitted.
-    let model = if request.session_id.is_some() {
-        normalize_model(session.model.clone())
-    } else {
-        normalize_model(
-            request
-                .model
-                .clone()
-                .or(session.model.clone())
-                .or(settings.model.clone()),
-        )
-    };
+    let model = session.model.clone();
     let tools = request
         .allowed_tools_preset
         .unwrap_or_else(|| session.allowed_tools_preset.clone());
@@ -590,6 +614,8 @@ pub fn run() {
             detect_claude,
             list_sessions,
             get_session,
+            set_session_model,
+            list_project_skills,
             delete_session,
             create_session,
             discover_claude_sessions,

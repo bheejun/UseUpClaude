@@ -6,11 +6,15 @@ export function ModelSelect({
   value,
   models,
   onChange,
+  disabled,
+  className,
 }: {
   id: string;
   value: string | null;
   models: ListedModel[];
   onChange: (model: string | null) => void;
+  disabled?: boolean;
+  className?: string;
 }) {
   const { t } = useI18n();
   const known = new Set(models.map((model) => model.id));
@@ -19,7 +23,11 @@ export function ModelSelect({
   return (
     <select
       id={id}
-      className="h-8 w-full rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      disabled={disabled}
+      className={
+        className ??
+        "h-8 w-full rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+      }
       value={value ?? ""}
       onChange={(e) => onChange(e.target.value || null)}
     >

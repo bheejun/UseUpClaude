@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
+import { ModelSelect, modelListMessage } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
@@ -18,6 +19,7 @@ import type {
   GuiSession,
   KeyStatus,
   ModelCatalog,
+  ProjectSkill,
   SessionCostReport,
   SessionSummary,
 } from "@/types";
@@ -54,6 +56,11 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [active, setActive] = useState<GuiSession | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [skill, setSkill] = useState<ProjectSkill | null>(null);
+  const [projectSkills, setProjectSkills] = useState<ProjectSkill[]>([]);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [skillIndex, setSkillIndex] = useState(0);
+  const modelWrite = useRef(Promise.resolve());
   const [draftUser, setDraftUser] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +114,30 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
+  useEffect(() => {
+    setSkill(null);
+    setSlashDismissed(false);
+  }, [active?.id]);
+
+  useEffect(() => {
+    if (!active?.cwd) {
+      setProjectSkills([]);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .listProjectSkills(active.cwd)
+      .then((rows) => {
+        if (!cancelled) setProjectSkills(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectSkills([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active?.cwd]);
+
   const selectSession = async (id: string) => {
     setError(null);
     setView("chat");
@@ -119,9 +150,42 @@ export default function App() {
       ? t("cliMissingLong")
       : null;
 
+  const slashQuery = prompt.startsWith("/") && !prompt.includes(" ") && !prompt.includes("\n") ? prompt.slice(1) : null;
+  const skillMenuOpen = slashQuery !== null && !slashDismissed && !!active && !skill;
+  const skillMatches = useMemo(() => {
+    if (slashQuery === null) return [];
+    const query = slashQuery.toLowerCase();
+    return projectSkills.filter(
+      (item) => item.name.toLowerCase().includes(query) || item.description.toLowerCase().includes(query),
+    );
+  }, [projectSkills, slashQuery]);
+
+  useEffect(() => {
+    setSkillIndex(0);
+  }, [slashQuery]);
+
+  const chooseModel = (model: string | null) => {
+    if (!active) return;
+    const id = active.id;
+    setActive((current) => (current && current.id === id ? { ...current, model } : current));
+    modelWrite.current = api
+      .setSessionModel(id, model)
+      .then((session) => {
+        setActive((current) => (current && current.id === id ? { ...current, model: session.model } : current));
+      })
+      .catch((e) => setError(String(e)));
+  };
+
+  const pickSkill = (next: ProjectSkill) => {
+    setSkill(next);
+    setPrompt("");
+    setSlashDismissed(false);
+  };
+
   const handleSend = async () => {
     const text = prompt.trim();
-    if (!text || busy || readyHint) return;
+    const chosen = skill;
+    if ((!text && !chosen) || busy || readyHint) return;
     if (!active) {
       setShowNewChat(true);
       return;
@@ -129,14 +193,17 @@ export default function App() {
     setBusy(true);
     setError(null);
     setPrompt("");
-    setDraftUser(text);
+    setSkill(null);
+    setDraftUser(chosen ? (text ? `/${chosen.name}\n${text}` : `/${chosen.name}`) : text);
     try {
+      await modelWrite.current;
       const res = await api.sendMessage({
         sessionId: active.id,
         prompt: text,
         cwd: active.cwd,
         model: active.model,
         allowedToolsPreset: active.allowedToolsPreset,
+        skill: chosen?.name ?? null,
       });
       setActive(res.session);
       setDraftUser(null);
@@ -149,6 +216,7 @@ export default function App() {
     } catch (e) {
       setError(String(e));
       setPrompt(text);
+      setSkill(chosen);
       setDraftUser(null);
       try {
         setActive(await api.getSession(active.id));
@@ -216,7 +284,7 @@ export default function App() {
       cwd: args.cwd,
       cliSessionId: args.sessionId,
       title: args.title,
-      model: settings.model,
+      model: null,
       allowedToolsPreset: settings.allowedToolsPreset,
     });
     setActive(session);
@@ -326,7 +394,6 @@ export default function App() {
           <SettingsView
             settings={settings}
             keyStatus={keyStatus}
-            catalog={catalog}
             detect={detect}
             onClose={() => setView("chat")}
             onSaved={async () => {
@@ -445,26 +512,108 @@ export default function App() {
               {readyHint && !error && (
                 <p className="mb-2 text-[13px] text-destructive">{t("setupHint", { hint: readyHint })}</p>
               )}
-              <div className="mx-auto flex max-w-3xl items-end gap-2">
-                <Textarea
-                  value={prompt}
-                  placeholder={active ? t("placeholderActive") : t("placeholderIdle")}
-                  disabled={busy || !!readyHint}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      void handleSend();
-                    }
-                  }}
+              <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2">
+                <label htmlFor="composer-model" className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {t("modelOptional")}
+                </label>
+                <ModelSelect
+                  id="composer-model"
+                  value={active?.model ?? null}
+                  models={catalog.models}
+                  disabled={!active || busy}
+                  className="h-8 w-[220px] rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                  onChange={chooseModel}
                 />
+                <p className="text-[11px] text-muted-foreground">{t("modelHint")}</p>
+              </div>
+              {active && modelListMessage(catalog, t) && (
+                <p className="mx-auto mb-2 max-w-3xl text-[11px] text-muted-foreground">{modelListMessage(catalog, t)}</p>
+              )}
+              <div className="relative mx-auto flex max-w-3xl items-end gap-2">
+                <div className="relative min-w-0 flex-1">
+                  {skill && (
+                    <div className="mb-1.5 flex">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-full border border-border bg-accent px-2 py-0.5 font-mono text-[11px] text-primary"
+                        onClick={() => setSkill(null)}
+                      >
+                        /{skill.name}
+                        <span className="text-muted-foreground">{t("removeSkill")}</span>
+                      </button>
+                    </div>
+                  )}
+                  {skillMenuOpen && (
+                    <div className="absolute bottom-full left-0 z-10 mb-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-[#101318] py-1 shadow-lg">
+                      {skillMatches.length === 0 ? (
+                        <p className="px-3 py-2 text-[12px] text-muted-foreground">{t("skillsNone")}</p>
+                      ) : (
+                        skillMatches.map((item, index) => (
+                          <button
+                            key={item.name}
+                            type="button"
+                            className={cn(
+                              "block w-full px-3 py-1.5 text-left hover:bg-accent",
+                              index === skillIndex && "bg-accent",
+                            )}
+                            onMouseEnter={() => setSkillIndex(index)}
+                            onClick={() => pickSkill(item)}
+                          >
+                            <span className="font-mono text-[13px]">/{item.name}</span>
+                            {item.description && (
+                              <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{item.description}</span>
+                            )}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                  <Textarea
+                    value={prompt}
+                    placeholder={active ? t("placeholderActive") : t("placeholderIdle")}
+                    disabled={busy || !!readyHint}
+                    onChange={(e) => {
+                      setPrompt(e.target.value);
+                      setSlashDismissed(false);
+                    }}
+                    onKeyDown={(e) => {
+                      if (skillMenuOpen && skillMatches.length > 0) {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setSkillIndex((index) => Math.min(skillMatches.length - 1, index + 1));
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setSkillIndex((index) => Math.max(0, index - 1));
+                          return;
+                        }
+                        if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+                          e.preventDefault();
+                          const next = skillMatches[skillIndex] ?? skillMatches[0];
+                          if (next) pickSkill(next);
+                          return;
+                        }
+                      }
+                      if (skillMenuOpen && e.key === "Escape") {
+                        e.preventDefault();
+                        setSlashDismissed(true);
+                        return;
+                      }
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        void handleSend();
+                      }
+                    }}
+                  />
+                </div>
                 <div className="flex flex-col gap-2">
                   {busy ? (
                     <Button type="button" variant="destructive" onClick={() => void api.cancelActive()}>
                       {t("cancel")}
                     </Button>
                   ) : (
-                    <Button type="submit" disabled={!prompt.trim() || !!readyHint}>
+                    <Button type="submit" disabled={(!prompt.trim() && !skill) || !!readyHint}>
                       {t("send")}
                     </Button>
                   )}
@@ -482,13 +631,11 @@ export default function App() {
         open={showNewChat}
         onOpenChange={setShowNewChat}
         defaultCwd={settings.defaultCwd}
-        defaultModel={settings.model}
         defaultTools={settings.allowedToolsPreset}
-        catalog={catalog}
-        onCreate={async ({ cwd, model, tools }) => {
+        onCreate={async ({ cwd, tools }) => {
           const session = await api.createSession({
             cwd,
-            model,
+            model: null,
             allowedToolsPreset: tools,
             title: t("newChat"),
           });

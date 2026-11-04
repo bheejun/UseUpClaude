@@ -50,6 +50,11 @@ export interface ListedModel {
   displayName: string;
 }
 
+export interface ProjectSkill {
+  name: string;
+  description: string;
+}
+
 export interface ModelCatalog {
   models: ListedModel[];
   errorCode: "no_key" | "unauthorized" | "failed" | null;

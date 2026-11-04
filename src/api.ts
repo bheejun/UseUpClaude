@@ -7,6 +7,7 @@ import type {
   GuiSession,
   KeyStatus,
   ModelCatalog,
+  ProjectSkill,
   SendMessageResponse,
   SessionCostReport,
   SessionSummary,
@@ -21,6 +22,9 @@ export const api = {
   deleteApiKey: () => invoke<KeyStatus>("delete_api_key"),
   sessionCosts: () => invoke<SessionCostReport>("session_costs"),
   listModels: () => invoke<ModelCatalog>("list_models"),
+  listProjectSkills: (cwd: string) => invoke<ProjectSkill[]>("list_project_skills", { cwd }),
+  setSessionModel: (id: string, model: string | null) =>
+    invoke<GuiSession>("set_session_model", { id, model }),
   detectClaude: () => invoke<ClaudeDetectResult>("detect_claude"),
   listSessions: () => invoke<SessionSummary[]>("list_sessions"),
   getSession: (id: string) => invoke<GuiSession>("get_session", { id }),
@@ -40,6 +44,7 @@ export const api = {
     cwd?: string | null;
     model?: string | null;
     allowedToolsPreset?: string | null;
+    skill?: string | null;
   }) => invoke<SendMessageResponse>("send_message", { request }),
   cancelActive: () => invoke<void>("cancel_active"),
   dataDir: () => invoke<string>("data_dir"),

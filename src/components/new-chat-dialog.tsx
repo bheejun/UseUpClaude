@@ -10,30 +10,23 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ModelSelect, modelListMessage } from "@/components/model-select";
 import { useI18n } from "@/i18n";
-import type { ModelCatalog } from "@/types";
 
 export function NewChatDialog({
   open: isOpen,
   onOpenChange,
   defaultCwd,
-  defaultModel,
   defaultTools,
-  catalog,
   onCreate,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultCwd: string | null;
-  defaultModel: string | null;
   defaultTools: string;
-  catalog: ModelCatalog;
-  onCreate: (args: { cwd: string; model: string | null; tools: string }) => Promise<void>;
+  onCreate: (args: { cwd: string; tools: string }) => Promise<void>;
 }) {
   const { t } = useI18n();
   const [cwd, setCwd] = useState(defaultCwd ?? "");
-  const [model, setModel] = useState(defaultModel ?? "");
   const [tools, setTools] = useState(defaultTools || "read");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -41,10 +34,9 @@ export function NewChatDialog({
   useEffect(() => {
     if (!isOpen) return;
     setCwd(defaultCwd ?? "");
-    setModel(defaultModel ?? "");
     setTools(defaultTools || "read");
     setErr(null);
-  }, [isOpen, defaultCwd, defaultModel, defaultTools]);
+  }, [isOpen, defaultCwd, defaultTools]);
 
   const pick = async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -78,19 +70,6 @@ export function NewChatDialog({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="model">{t("modelOptional")}</Label>
-            <ModelSelect
-              id="model"
-              value={model || null}
-              models={catalog.models}
-              onChange={(next) => setModel(next ?? "")}
-            />
-            <p className="text-[12px] text-muted-foreground">{t("modelHint")}</p>
-            {modelListMessage(catalog, t) && (
-              <p className="text-[12px] text-muted-foreground">{modelListMessage(catalog, t)}</p>
-            )}
-          </div>
-          <div className="space-y-1.5">
             <Label htmlFor="tools">{t("allowedTools")}</Label>
             <select
               id="tools"
@@ -116,7 +95,6 @@ export function NewChatDialog({
                 setErr(null);
                 void onCreate({
                   cwd: cwd.trim(),
-                  model: model.trim() || null,
                   tools,
                 })
                   .catch((e) => setErr(String(e)))
