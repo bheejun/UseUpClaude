@@ -122,7 +122,7 @@ fn set_session_model(
 
 #[tauri::command]
 fn list_project_skills(cwd: String) -> Vec<skills::ProjectSkill> {
-    skills::list_project_skills(std::path::Path::new(&cwd))
+    skills::list_available_skills(std::path::Path::new(&cwd))
 }
 
 #[tauri::command]
@@ -291,10 +291,10 @@ async fn send_message(
 
     let cwd = PathBuf::from(&session.cwd);
     let prompt = match requested_skill.as_deref() {
-        Some(name) if skills::is_skill_name(name) && skills::project_has_skill(&cwd, name) => {
+        Some(name) if skills::is_skill_name(name) && skills::has_skill(&cwd, name) => {
             skills::compose_prompt(&typed, Some(name))
         }
-        Some(_) => return Err("That skill is not in this project.".into()),
+        Some(_) => return Err("That skill is not available.".into()),
         None => typed,
     };
     // The composer chooses the model for this chat. Null keeps the CLI default and omits --model.
