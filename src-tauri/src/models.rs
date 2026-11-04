@@ -53,6 +53,9 @@ pub struct GuiTurn {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub status: TurnStatus,
+    /// This turn's CLI `total_cost_usd`, when Claude reported one.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +135,23 @@ pub struct SendMessageResponse {
     pub assistant_turn: GuiTurn,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredSession {
+    pub session_id: String,
+    pub title: String,
+    pub modified_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredProject {
+    /// Project directory when a session record included `cwd`.
+    pub cwd: Option<String>,
+    pub label: String,
+    pub sessions: Vec<DiscoveredSession>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionTestResult {
@@ -141,7 +161,8 @@ pub struct ConnectionTestResult {
     pub result_preview: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClaudeJsonOutput {
     pub session_id: Option<String>,
     pub result: Option<serde_json::Value>,
@@ -149,4 +170,16 @@ pub struct ClaudeJsonOutput {
     pub error: Option<String>,
     #[serde(default)]
     pub subtype: Option<String>,
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
+}
+
+/// Parsed Claude CLI `--output-format json` envelope.
+/// `result_text` is the assistant message, never the raw object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CliEnvelope {
+    pub result_text: String,
+    pub session_id: Option<String>,
+    pub total_cost_usd: Option<f64>,
+    pub is_error: bool,
 }

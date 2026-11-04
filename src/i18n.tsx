@@ -1,0 +1,552 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import { cn } from "@/lib/utils";
+
+export type Locale = "ko" | "en" | "ja" | "zh" | "es";
+
+const STORAGE_KEY = "useupclaude.locale";
+
+export const LOCALE_OPTIONS: { id: Locale; label: string }[] = [
+  { id: "ko", label: "한국어" },
+  { id: "en", label: "English" },
+  { id: "ja", label: "日本語" },
+  { id: "zh", label: "简体中文" },
+  { id: "es", label: "Español" },
+];
+
+const HTML_LANG: Record<Locale, string> = {
+  ko: "ko",
+  en: "en",
+  ja: "ja",
+  zh: "zh-CN",
+  es: "es",
+};
+
+const en = {
+  brandTagline: "claude -p · local one-shot",
+  newChat: "New chat",
+  settings: "Settings",
+  noSessions: "No chats in this project.",
+  sessionCost: "session {cost}",
+  noTurnCostYet: "Cost shows after a reply.",
+  balanceNote: "Remaining balance isn't available to this key.",
+  resumeReady: "resume ready",
+  newSession: "new session",
+  keyOk: "key ok",
+  noKey: "no key",
+  cliOk: "cli ok",
+  cliMissing: "cli missing",
+  tools: "tools {preset}",
+  startTitle: "Start a chat",
+  startBody: "Pick a project folder. Each message is one claude -p call. The reply is the result text, rendered as markdown.",
+  working: "Working",
+  workingCommand: "claude -p --output-format json",
+  thisTurn: "this turn {cost}",
+  placeholderActive: "Message UseUpClaude…",
+  placeholderIdle: "Create a chat to start…",
+  setupHint: "{hint}. Open Settings to finish setup.",
+  cancel: "Stop",
+  send: "Send",
+  composerHint: "Enter to send · Shift+Enter for a new line",
+  printModeWarning:
+    "claude -p has less context than interactive Claude Code and may not complete work as well.",
+  loading: "Loading…",
+  newChatHint: "The folder becomes the Claude Code working directory. Tools start read-only.",
+  projectFolder: "Project folder",
+  browse: "Browse",
+  modelOptional: "Model",
+  modelPlaceholder: "CLI default",
+  allowedTools: "Allowed tools",
+  toolsRead: "Read only",
+  toolsReadEdit: "Read + Edit",
+  toolsFull: "Unrestricted",
+  create: "Create",
+  settingsSubtitle: "Keys stay in OS secure storage and are never logged.",
+  apiKey: "Anthropic API key",
+  apiKeySaved: "Saved {mask}",
+  apiKeyEmpty: "Paste sk-ant-… then Save",
+  saveKey: "Save key",
+  deleteKey: "Delete key",
+  testConnection: "Test",
+  keySaved: "API key saved to the OS credential store.",
+  keyDeleted: "API key deleted.",
+  binaryPath: "claude binary",
+  binaryPlaceholder: "Empty uses PATH",
+  detect: "Detect",
+  defaultFolder: "Default project folder",
+  defaultModel: "Default model",
+  cliDefault: "CLI default",
+  defaultTools: "Default tools",
+  timeoutSeconds: "Timeout (seconds)",
+  localHistory: "Local history {path}",
+  settingsSaved: "Settings saved.",
+  saveSettings: "Save settings",
+  back: "Back",
+  language: "Language",
+  allProjects: "All projects",
+  openClaudeSessions: "Claude Code sessions",
+  discoverTitle: "Open a Claude Code session",
+  discoverHint: "Sessions already on this machine, grouped by project folder.",
+  discoverEmpty: "No Claude Code sessions found under ~/.claude/projects.",
+  discoverOpen: "Open",
+  discoverNoCwd: "Folder unknown",
+  discoverPrivacy: "Only the session id, folder, and a short title are read. The transcript is not imported.",
+  resumedEmpty: "This continues a Claude Code session. Earlier turns stay in Claude Code. The next message uses --resume.",
+  emptyThread: "Send a message. The reply shows up here when claude -p finishes.",
+  close: "Close",
+  you: "You",
+  assistantName: "UseUpClaude",
+  apiKeyRequired: "API key required",
+  cliMissingLong: "claude binary not found",
+  foundCli: "Found {detail}",
+  notFound: "Not found",
+  detectedCli: "Detected {detail}",
+  roleError: "Error",
+} as const;
+
+type Key = keyof typeof en;
+type Dict = { [K in Key]: string };
+
+const ko: Dict = {
+  brandTagline: "claude -p · 로컬 원샷",
+  newChat: "새 채팅",
+  settings: "설정",
+  noSessions: "이 프로젝트에 채팅이 없습니다.",
+  sessionCost: "세션 {cost}",
+  noTurnCostYet: "답변이 오면 비용이 표시됩니다.",
+  balanceNote: "이 API 키로는 남은 잔액을 확인할 수 없습니다.",
+  resumeReady: "이어가기 준비됨",
+  newSession: "새 세션",
+  keyOk: "키 있음",
+  noKey: "키 없음",
+  cliOk: "cli 있음",
+  cliMissing: "cli 없음",
+  tools: "도구 {preset}",
+  startTitle: "채팅 시작",
+  startBody: "프로젝트 폴더를 고르세요. 메시지는 claude -p 한 번으로 가고, 답의 result를 마크다운으로 보여 줍니다.",
+  working: "작업 중",
+  workingCommand: "claude -p --output-format json",
+  thisTurn: "이번 턴 {cost}",
+  placeholderActive: "UseUpClaude에게 메시지…",
+  placeholderIdle: "채팅을 만든 뒤 입력하세요…",
+  setupHint: "{hint}. 설정에서 준비를 끝내세요.",
+  cancel: "중지",
+  send: "보내기",
+  composerHint: "Enter로 보내기 · Shift+Enter로 줄바꿈",
+  printModeWarning:
+    "claude -p는 대화형 Claude Code보다 맥락이 적어서, 작업을 그만큼 잘 끝내지 못할 수 있습니다.",
+  loading: "불러오는 중…",
+  newChatHint: "이 폴더가 Claude Code 작업 디렉터리가 됩니다. 도구는 읽기 전용으로 시작합니다.",
+  projectFolder: "프로젝트 폴더",
+  browse: "찾아보기",
+  modelOptional: "모델",
+  modelPlaceholder: "CLI 기본값",
+  allowedTools: "허용 도구",
+  toolsRead: "읽기 전용",
+  toolsReadEdit: "읽기 + 편집",
+  toolsFull: "제한 없음",
+  create: "만들기",
+  settingsSubtitle: "키는 OS 보안 저장소에만 두고, 로그에 남기지 않습니다.",
+  apiKey: "Anthropic API 키",
+  apiKeySaved: "저장됨 {mask}",
+  apiKeyEmpty: "sk-ant-… 를 붙여 넣고 저장",
+  saveKey: "키 저장",
+  deleteKey: "키 삭제",
+  testConnection: "테스트",
+  keySaved: "API 키를 OS 자격 증명 저장소에 저장했습니다.",
+  keyDeleted: "API 키를 삭제했습니다.",
+  binaryPath: "claude 실행 파일",
+  binaryPlaceholder: "비우면 PATH에서 찾습니다",
+  detect: "찾기",
+  defaultFolder: "기본 프로젝트 폴더",
+  defaultModel: "기본 모델",
+  cliDefault: "CLI 기본값",
+  defaultTools: "기본 도구",
+  timeoutSeconds: "제한 시간(초)",
+  localHistory: "로컬 기록 {path}",
+  settingsSaved: "설정을 저장했습니다.",
+  saveSettings: "설정 저장",
+  back: "뒤로",
+  language: "언어",
+  allProjects: "모든 프로젝트",
+  openClaudeSessions: "Claude Code 세션",
+  discoverTitle: "Claude Code 세션 열기",
+  discoverHint: "이 컴퓨터에 있는 세션을 프로젝트 폴더별로 모았습니다.",
+  discoverEmpty: "~/.claude/projects 아래에서 Claude Code 세션을 찾지 못했습니다.",
+  discoverOpen: "열기",
+  discoverNoCwd: "폴더를 알 수 없음",
+  discoverPrivacy: "세션 id, 폴더, 짧은 제목만 읽습니다. 대화 원문은 가져오지 않습니다.",
+  resumedEmpty: "Claude Code 세션을 이어갑니다. 이전 턴은 Claude Code에 남아 있고, 다음 메시지는 --resume을 사용합니다.",
+  emptyThread: "메시지를 보내면 claude -p가 끝난 뒤 답변이 여기에 나타납니다.",
+  close: "닫기",
+  you: "나",
+  assistantName: "UseUpClaude",
+  apiKeyRequired: "API 키가 필요합니다",
+  cliMissingLong: "claude 실행 파일을 찾지 못했습니다",
+  foundCli: "찾음 {detail}",
+  notFound: "없음",
+  detectedCli: "감지됨 {detail}",
+  roleError: "오류",
+};
+
+const ja: Dict = {
+  brandTagline: "claude -p · ローカル単発",
+  newChat: "新しいチャット",
+  settings: "設定",
+  noSessions: "このプロジェクトにチャットはありません。",
+  sessionCost: "セッション {cost}",
+  noTurnCostYet: "返信後に費用を表示します。",
+  balanceNote: "この API キーでは残高を確認できません。",
+  resumeReady: "再開準備完了",
+  newSession: "新しいセッション",
+  keyOk: "キーあり",
+  noKey: "キーなし",
+  cliOk: "cli あり",
+  cliMissing: "cli なし",
+  tools: "ツール {preset}",
+  startTitle: "チャットを始める",
+  startBody: "プロジェクトフォルダを選びます。メッセージは claude -p を1回呼び、result をマークダウンで表示します。",
+  working: "作業中",
+  workingCommand: "claude -p --output-format json",
+  thisTurn: "このターン {cost}",
+  placeholderActive: "UseUpClaude にメッセージ…",
+  placeholderIdle: "チャットを作成してから入力…",
+  setupHint: "{hint}。設定で準備を終えてください。",
+  cancel: "停止",
+  send: "送信",
+  composerHint: "Enter で送信 · Shift+Enter で改行",
+  printModeWarning:
+    "claude -p は対話型の Claude Code より文脈が少なく、作業を同じようには完了できないことがあります。",
+  loading: "読み込み中…",
+  newChatHint: "このフォルダが Claude Code の作業ディレクトリになります。ツールは読み取り専用から始まります。",
+  projectFolder: "プロジェクトフォルダ",
+  browse: "参照",
+  modelOptional: "モデル",
+  modelPlaceholder: "CLI の既定",
+  allowedTools: "許可するツール",
+  toolsRead: "読み取り専用",
+  toolsReadEdit: "読み取り + 編集",
+  toolsFull: "制限なし",
+  create: "作成",
+  settingsSubtitle: "キーは OS の安全な保存先にのみ置き、ログには出しません。",
+  apiKey: "Anthropic API キー",
+  apiKeySaved: "保存済み {mask}",
+  apiKeyEmpty: "sk-ant-… を貼って保存",
+  saveKey: "キーを保存",
+  deleteKey: "キーを削除",
+  testConnection: "テスト",
+  keySaved: "API キーを OS の資格情報ストアに保存しました。",
+  keyDeleted: "API キーを削除しました。",
+  binaryPath: "claude 実行ファイル",
+  binaryPlaceholder: "空なら PATH から探します",
+  detect: "検出",
+  defaultFolder: "既定のプロジェクトフォルダ",
+  defaultModel: "既定のモデル",
+  cliDefault: "CLI の既定",
+  defaultTools: "既定のツール",
+  timeoutSeconds: "タイムアウト（秒）",
+  localHistory: "ローカル履歴 {path}",
+  settingsSaved: "設定を保存しました。",
+  saveSettings: "設定を保存",
+  back: "戻る",
+  language: "言語",
+  allProjects: "すべてのプロジェクト",
+  openClaudeSessions: "Claude Code セッション",
+  discoverTitle: "Claude Code セッションを開く",
+  discoverHint: "このマシン上のセッションをプロジェクトフォルダ別に表示します。",
+  discoverEmpty: "~/.claude/projects に Claude Code セッションが見つかりません。",
+  discoverOpen: "開く",
+  discoverNoCwd: "フォルダ不明",
+  discoverPrivacy: "読むのはセッション id、フォルダ、短いタイトルだけです。本文は取り込みません。",
+  resumedEmpty: "Claude Code のセッションを続けます。以前のターンは Claude Code 側に残り、次のメッセージは --resume を使います。",
+  emptyThread: "メッセージを送ると、claude -p が終わったあと返信がここに出ます。",
+  close: "閉じる",
+  you: "あなた",
+  assistantName: "UseUpClaude",
+  apiKeyRequired: "API キーが必要です",
+  cliMissingLong: "claude 実行ファイルが見つかりません",
+  foundCli: "検出 {detail}",
+  notFound: "見つかりません",
+  detectedCli: "検出済み {detail}",
+  roleError: "エラー",
+};
+
+const zh: Dict = {
+  brandTagline: "claude -p · 本地单次",
+  newChat: "新聊天",
+  settings: "设置",
+  noSessions: "这个项目里还没有聊天。",
+  sessionCost: "会话 {cost}",
+  noTurnCostYet: "回复后会显示费用。",
+  balanceNote: "此 API 密钥无法查询剩余余额。",
+  resumeReady: "可以继续",
+  newSession: "新会话",
+  keyOk: "已有密钥",
+  noKey: "无密钥",
+  cliOk: "cli 可用",
+  cliMissing: "缺少 cli",
+  tools: "工具 {preset}",
+  startTitle: "开始聊天",
+  startBody: "选择项目文件夹。每条消息调用一次 claude -p，并把 result 渲染成 Markdown。",
+  working: "正在处理",
+  workingCommand: "claude -p --output-format json",
+  thisTurn: "本轮 {cost}",
+  placeholderActive: "给 UseUpClaude 发消息…",
+  placeholderIdle: "先新建聊天再输入…",
+  setupHint: "{hint}。请到设置里完成准备。",
+  cancel: "停止",
+  send: "发送",
+  composerHint: "Enter 发送 · Shift+Enter 换行",
+  printModeWarning: "claude -p 的上下文少于交互式 Claude Code，可能无法同样好地完成工作。",
+  loading: "正在加载…",
+  newChatHint: "这个文件夹会成为 Claude Code 的工作目录。工具默认只读。",
+  projectFolder: "项目文件夹",
+  browse: "浏览",
+  modelOptional: "模型",
+  modelPlaceholder: "CLI 默认",
+  allowedTools: "允许的工具",
+  toolsRead: "只读",
+  toolsReadEdit: "读取 + 编辑",
+  toolsFull: "不限制",
+  create: "创建",
+  settingsSubtitle: "密钥只放在操作系统的安全存储里，不会写入日志。",
+  apiKey: "Anthropic API 密钥",
+  apiKeySaved: "已保存 {mask}",
+  apiKeyEmpty: "粘贴 sk-ant-… 后保存",
+  saveKey: "保存密钥",
+  deleteKey: "删除密钥",
+  testConnection: "测试",
+  keySaved: "API 密钥已保存到系统凭据存储。",
+  keyDeleted: "API 密钥已删除。",
+  binaryPath: "claude 可执行文件",
+  binaryPlaceholder: "留空则从 PATH 查找",
+  detect: "检测",
+  defaultFolder: "默认项目文件夹",
+  defaultModel: "默认模型",
+  cliDefault: "CLI 默认",
+  defaultTools: "默认工具",
+  timeoutSeconds: "超时（秒）",
+  localHistory: "本地记录 {path}",
+  settingsSaved: "设置已保存。",
+  saveSettings: "保存设置",
+  back: "返回",
+  language: "语言",
+  allProjects: "全部项目",
+  openClaudeSessions: "Claude Code 会话",
+  discoverTitle: "打开 Claude Code 会话",
+  discoverHint: "按项目文件夹列出这台电脑上已有的会话。",
+  discoverEmpty: "在 ~/.claude/projects 下没有找到 Claude Code 会话。",
+  discoverOpen: "打开",
+  discoverNoCwd: "未知文件夹",
+  discoverPrivacy: "只读取会话 id、文件夹和短标题。不会导入对话原文。",
+  resumedEmpty: "这将继续一个 Claude Code 会话。之前的回合仍留在 Claude Code 中，下一条消息会使用 --resume。",
+  emptyThread: "发送消息后，claude -p 结束时回复会显示在这里。",
+  close: "关闭",
+  you: "你",
+  assistantName: "UseUpClaude",
+  apiKeyRequired: "需要 API 密钥",
+  cliMissingLong: "找不到 claude 可执行文件",
+  foundCli: "已找到 {detail}",
+  notFound: "未找到",
+  detectedCli: "已检测到 {detail}",
+  roleError: "错误",
+};
+
+const es: Dict = {
+  brandTagline: "claude -p · un solo turno local",
+  newChat: "Nuevo chat",
+  settings: "Ajustes",
+  noSessions: "No hay chats en este proyecto.",
+  sessionCost: "sesión {cost}",
+  noTurnCostYet: "El coste aparece tras la respuesta.",
+  balanceNote: "El saldo restante no está disponible con esta clave.",
+  resumeReady: "listo para continuar",
+  newSession: "sesión nueva",
+  keyOk: "clave ok",
+  noKey: "sin clave",
+  cliOk: "cli ok",
+  cliMissing: "falta cli",
+  tools: "herramientas {preset}",
+  startTitle: "Empieza un chat",
+  startBody: "Elige una carpeta de proyecto. Cada mensaje llama a claude -p una vez y muestra result como markdown.",
+  working: "Trabajando",
+  workingCommand: "claude -p --output-format json",
+  thisTurn: "este turno {cost}",
+  placeholderActive: "Escribe a UseUpClaude…",
+  placeholderIdle: "Crea un chat para empezar…",
+  setupHint: "{hint}. Abre Ajustes para terminar la configuración.",
+  cancel: "Detener",
+  send: "Enviar",
+  composerHint: "Enter para enviar · Shift+Enter para una línea nueva",
+  printModeWarning:
+    "claude -p tiene menos contexto que Claude Code interactivo y puede no completar el trabajo igual de bien.",
+  loading: "Cargando…",
+  newChatHint: "La carpeta pasa a ser el directorio de trabajo de Claude Code. Las herramientas empiezan en solo lectura.",
+  projectFolder: "Carpeta del proyecto",
+  browse: "Examinar",
+  modelOptional: "Modelo",
+  modelPlaceholder: "Predeterminado del CLI",
+  allowedTools: "Herramientas permitidas",
+  toolsRead: "Solo lectura",
+  toolsReadEdit: "Lectura + edición",
+  toolsFull: "Sin restricciones",
+  create: "Crear",
+  settingsSubtitle: "Las claves quedan en el almacén seguro del sistema y no se registran.",
+  apiKey: "Clave de API de Anthropic",
+  apiKeySaved: "Guardada {mask}",
+  apiKeyEmpty: "Pega sk-ant-… y guarda",
+  saveKey: "Guardar clave",
+  deleteKey: "Borrar clave",
+  testConnection: "Probar",
+  keySaved: "Clave de API guardada en el almacén del sistema.",
+  keyDeleted: "Clave de API borrada.",
+  binaryPath: "Binario de claude",
+  binaryPlaceholder: "Vacío: buscar en PATH",
+  detect: "Detectar",
+  defaultFolder: "Carpeta de proyecto predeterminada",
+  defaultModel: "Modelo predeterminado",
+  cliDefault: "Predeterminado del CLI",
+  defaultTools: "Herramientas predeterminadas",
+  timeoutSeconds: "Tiempo de espera (segundos)",
+  localHistory: "Historial local {path}",
+  settingsSaved: "Ajustes guardados.",
+  saveSettings: "Guardar ajustes",
+  back: "Volver",
+  language: "Idioma",
+  allProjects: "Todos los proyectos",
+  openClaudeSessions: "Sesiones de Claude Code",
+  discoverTitle: "Abrir una sesión de Claude Code",
+  discoverHint: "Sesiones de este equipo, agrupadas por carpeta de proyecto.",
+  discoverEmpty: "No hay sesiones de Claude Code en ~/.claude/projects.",
+  discoverOpen: "Abrir",
+  discoverNoCwd: "Carpeta desconocida",
+  discoverPrivacy: "Solo se leen el id de sesión, la carpeta y un título corto. No se importa la transcripción.",
+  resumedEmpty: "Esto continúa una sesión de Claude Code. Los turnos anteriores siguen allí. El siguiente mensaje usa --resume.",
+  emptyThread: "Envía un mensaje. La respuesta aparece aquí cuando termina claude -p.",
+  close: "Cerrar",
+  you: "Tú",
+  assistantName: "UseUpClaude",
+  apiKeyRequired: "Hace falta una clave de API",
+  cliMissingLong: "No se encontró el binario claude",
+  foundCli: "Encontrado {detail}",
+  notFound: "No encontrado",
+  detectedCli: "Detectado {detail}",
+  roleError: "Error",
+};
+
+const DICTS: Record<Locale, Dict> = { en, ko, ja, zh, es };
+
+function isLocale(value: string | null): value is Locale {
+  return value === "ko" || value === "en" || value === "ja" || value === "zh" || value === "es";
+}
+
+export function detectLocale(): Locale {
+  const langs =
+    typeof navigator !== "undefined" && navigator.languages?.length
+      ? navigator.languages
+      : [typeof navigator !== "undefined" ? navigator.language : "ko"];
+  for (const raw of langs) {
+    const tag = raw.toLowerCase();
+    if (tag.startsWith("ko")) return "ko";
+    if (tag.startsWith("ja")) return "ja";
+    if (
+      tag === "zh" ||
+      tag.startsWith("zh-cn") ||
+      tag.startsWith("zh-hans") ||
+      tag.startsWith("zh-sg")
+    ) {
+      return "zh";
+    }
+    if (tag.startsWith("es")) return "es";
+    if (tag.startsWith("en")) return "en";
+  }
+  return "ko";
+}
+
+function readStoredLocale(): Locale {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (isLocale(saved)) return saved;
+  } catch {
+    // Private mode or a blocked store. Fall through to the OS locale.
+  }
+  return detectLocale();
+}
+
+function fill(template: string, vars?: Record<string, string | number>): string {
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_, key: string) =>
+    vars[key] != null ? String(vars[key]) : `{${key}}`,
+  );
+}
+
+type I18nValue = {
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  t: (key: Key, vars?: Record<string, string | number>) => string;
+};
+
+const I18nContext = createContext<I18nValue | null>(null);
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>(readStoredLocale);
+
+  useEffect(() => {
+    document.documentElement.lang = HTML_LANG[locale];
+    document.documentElement.classList.add("dark");
+  }, [locale]);
+
+  const setLocale = useCallback((next: Locale) => {
+    setLocaleState(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, next);
+    } catch {
+      // Ignore storage failures. The in-memory locale still applies.
+    }
+  }, []);
+
+  const t = useCallback(
+    (key: Key, vars?: Record<string, string | number>) =>
+      fill(DICTS[locale][key] ?? DICTS.ko[key], vars),
+    [locale],
+  );
+
+  const value = useMemo(() => ({ locale, setLocale, t }), [locale, setLocale, t]);
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n(): I18nValue {
+  const ctx = useContext(I18nContext);
+  if (!ctx) throw new Error("useI18n must be used within I18nProvider");
+  return ctx;
+}
+
+export function LanguageSelect({ className }: { className?: string }) {
+  const { locale, setLocale, t } = useI18n();
+  return (
+    <select
+      aria-label={t("language")}
+      className={cn(
+        "h-8 w-full rounded-md border border-input bg-[#0c0e11] px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        className,
+      )}
+      value={locale}
+      onChange={(e) => {
+        if (isLocale(e.target.value)) setLocale(e.target.value);
+      }}
+    >
+      {LOCALE_OPTIONS.map((option) => (
+        <option key={option.id} value={option.id}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  );
+}

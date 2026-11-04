@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { api } from "./api";
-import type {
-  AppSettings,
-  ClaudeDetectResult,
-  GuiSession,
-  KeyStatus,
-  SessionSummary,
-} from "./types";
-import "./App.css";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Folder, Plus, Settings, Terminal } from "lucide-react";
+import { api } from "@/api";
+import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
+import { ChatThread, type Bubble } from "@/components/chat-thread";
+import { DiscoverDialog } from "@/components/discover-dialog";
+import { NewChatDialog } from "@/components/new-chat-dialog";
+import { SettingsView } from "@/components/settings-view";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { LanguageSelect, useI18n } from "@/i18n";
+import { cn } from "@/lib/utils";
+import type { AppSettings, ClaudeDetectResult, GuiSession, KeyStatus, SessionSummary } from "@/types";
 
 type View = "chat" | "settings";
 
@@ -20,26 +23,34 @@ const DEFAULT_SETTINGS: AppSettings = {
   allowedToolsPreset: "read",
 };
 
+function PrintModeWarning() {
+  const { t } = useI18n();
+  return (
+    <p className="border-b border-amber-900/70 bg-amber-950/40 px-4 py-2 text-[12.5px] leading-snug text-amber-100/90">
+      {t("printModeWarning")}
+    </p>
+  );
+}
+
 export default function App() {
+  const { t } = useI18n();
   const [view, setView] = useState<View>("chat");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [keyStatus, setKeyStatus] = useState<KeyStatus>({
-    configured: false,
-    masked: null,
-  });
+  const [keyStatus, setKeyStatus] = useState<KeyStatus>({ configured: false, masked: null });
   const [detect, setDetect] = useState<ClaudeDetectResult | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [active, setActive] = useState<GuiSession | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [draftUser, setDraftUser] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showNewChat, setShowNewChat] = useState(false);
+  const [showDiscover, setShowDiscover] = useState(false);
+  const [projectFilter, setProjectFilter] = useState("all");
   const [bootstrapped, setBootstrapped] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const refreshSessions = useCallback(async () => {
-    const list = await api.listSessions();
-    setSessions(list);
+    setSessions(await api.listSessions());
   }, []);
 
   const bootstrap = useCallback(async () => {
@@ -53,9 +64,7 @@ export default function App() {
       setKeyStatus(k);
       setDetect(d);
       await refreshSessions();
-      if (!k.configured || !d.found) {
-        setView("settings");
-      }
+      if (!k.configured || !d.found) setView("settings");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -67,103 +76,210 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [active?.turns, busy]);
-
   const selectSession = async (id: string) => {
     setError(null);
     setView("chat");
-    const session = await api.getSession(id);
-    setActive(session);
+    setActive(await api.getSession(id));
   };
+
+  const readyHint = !keyStatus.configured
+    ? t("apiKeyRequired")
+    : !detect?.found
+      ? t("cliMissingLong")
+      : null;
 
   const handleSend = async () => {
     const text = prompt.trim();
-    if (!text || busy) return;
+    if (!text || busy || readyHint) return;
+    if (!active) {
+      setShowNewChat(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     setPrompt("");
+    setDraftUser(text);
     try {
       const res = await api.sendMessage({
-        sessionId: active?.id ?? null,
+        sessionId: active.id,
         prompt: text,
-        cwd: active?.cwd ?? settings.defaultCwd,
-        model: active?.model ?? settings.model,
-        allowedToolsPreset:
-          active?.allowedToolsPreset ?? settings.allowedToolsPreset,
+        cwd: active.cwd,
+        model: active.model ?? settings.model,
+        allowedToolsPreset: active.allowedToolsPreset,
       });
       setActive(res.session);
+      setDraftUser(null);
       await refreshSessions();
     } catch (e) {
       setError(String(e));
+      setPrompt(text);
+      setDraftUser(null);
+      try {
+        setActive(await api.getSession(active.id));
+      } catch {
+        // Keep the session already on screen.
+      }
     } finally {
       setBusy(false);
     }
   };
 
-  const handleCancel = async () => {
-    try {
-      await api.cancelActive();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+  const costThisSession = useMemo(() => sumSessionCost(active?.turns), [active]);
 
-  const readyHint = useMemo(() => {
-    if (!keyStatus.configured) return "API key required";
-    if (!detect?.found) return "claude binary not found";
-    return null;
-  }, [keyStatus, detect]);
+  const projects = useMemo(() => {
+    const set = new Set(sessions.map((s) => s.cwd).filter(Boolean));
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [sessions]);
+
+  const visible = useMemo(
+    () => (projectFilter === "all" ? sessions : sessions.filter((s) => s.cwd === projectFilter)),
+    [sessions, projectFilter],
+  );
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, SessionSummary[]>();
+    for (const session of visible) {
+      const list = map.get(session.cwd) ?? [];
+      list.push(session);
+      map.set(session.cwd, list);
+    }
+    return [...map.entries()];
+  }, [visible]);
+
+  const bubbles: Bubble[] = useMemo(() => {
+    const fromSession = (active?.turns ?? []).map((turn) => {
+      const shown = presentTurn(turn);
+      return {
+        id: turn.id,
+        role: turn.role,
+        text: shown.text,
+        costUsd: shown.costUsd,
+      };
+    });
+    if (draftUser) {
+      fromSession.push({
+        id: "draft-user",
+        role: "user",
+        text: draftUser,
+        costUsd: null,
+      });
+    }
+    return fromSession;
+  }, [active, draftUser]);
+
+  const openDiscovered = async (args: { cwd: string; sessionId: string; title: string }) => {
+    const existing = sessions.find((s) => s.cliSessionId === args.sessionId);
+    if (existing) {
+      await selectSession(existing.id);
+      setShowDiscover(false);
+      return;
+    }
+    const session = await api.createSession({
+      cwd: args.cwd,
+      cliSessionId: args.sessionId,
+      title: args.title,
+      model: settings.model,
+      allowedToolsPreset: settings.allowedToolsPreset,
+    });
+    setActive(session);
+    setShowDiscover(false);
+    setView("chat");
+    await refreshSessions();
+  };
 
   if (!bootstrapped) {
     return (
-      <div className="app" style={{ placeItems: "center", display: "grid" }}>
-        <p className="status-line">Loading…</p>
+      <div className="grid h-full place-items-center font-mono text-xs text-muted-foreground">
+        {t("loading")}
       </div>
     );
   }
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <h1>Claude GUI</h1>
-          <p>Claude Code CLI · local `-p` wrapper</p>
+    <div className="flex h-full min-h-0 bg-background text-foreground">
+      <aside className="hidden w-[272px] shrink-0 flex-col border-r border-border bg-[#101318] min-[821px]:flex">
+        <div className="border-b border-border px-3 py-3">
+          <h1 className="font-mono text-[15px] tracking-tight text-primary">UseUpClaude</h1>
+          <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            {t("brandTagline")}
+          </p>
+          <LanguageSelect className="mt-3" />
         </div>
-        <div className="sidebar-actions">
-          <button
-            className="btn btn-primary"
-            style={{ flex: 1 }}
-            onClick={() => setShowNewChat(true)}
+        <div className="flex gap-2 px-3 py-3">
+          <Button className="flex-1" onClick={() => setShowNewChat(true)}>
+            <Plus className="size-3.5" />
+            {t("newChat")}
+          </Button>
+          <Button variant="outline" size="icon" aria-label={t("settings")} onClick={() => setView("settings")}>
+            <Settings className="size-3.5" />
+          </Button>
+        </div>
+        <div className="px-3 pb-2">
+          <Button variant="outline" className="w-full justify-start" onClick={() => setShowDiscover(true)}>
+            <Terminal className="size-3.5" />
+            {t("openClaudeSessions")}
+          </Button>
+        </div>
+        <div className="px-3 pb-2">
+          <select
+            aria-label={t("allProjects")}
+            className="h-8 w-full rounded-md border border-input bg-[#0c0e11] px-2 font-mono text-[11px] outline-none"
+            value={projectFilter}
+            onChange={(e) => setProjectFilter(e.target.value)}
           >
-            New chat
-          </button>
-          <button className="btn" onClick={() => setView("settings")}>
-            Settings
-          </button>
+            <option value="all">{t("allProjects")}</option>
+            {projects.map((cwd) => (
+              <option key={cwd} value={cwd}>
+                {folderBase(cwd)}
+              </option>
+            ))}
+          </select>
         </div>
-        <div className="session-list">
-          {sessions.length === 0 ? (
-            <p className="status-line" style={{ padding: "8px 10px" }}>
-              No sessions yet.
-            </p>
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+          {grouped.length === 0 ? (
+            <p className="px-2 py-2 text-[12px] text-muted-foreground">{t("noSessions")}</p>
           ) : (
-            sessions.map((s) => (
-              <button
-                key={s.id}
-                className={`session-item ${active?.id === s.id ? "active" : ""}`}
-                onClick={() => void selectSession(s.id)}
-              >
-                <span className="title">{s.title}</span>
-                <span className="meta">{s.cwd}</span>
-              </button>
+            grouped.map(([cwd, items]) => (
+              <section key={cwd || "none"} className="mb-3">
+                <h2
+                  className="flex items-center gap-1 truncate px-2 py-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+                  title={cwd}
+                >
+                  <Folder className="size-3 shrink-0" />
+                  {folderBase(cwd)}
+                </h2>
+                {items.map((session) => (
+                  <button
+                    key={session.id}
+                    type="button"
+                    className={cn(
+                      "mb-0.5 w-full rounded-md px-2 py-1.5 text-left hover:bg-accent",
+                      active?.id === session.id && "bg-accent",
+                    )}
+                    onClick={() => void selectSession(session.id)}
+                  >
+                    <span className="block truncate text-[13px]">{session.title}</span>
+                    <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                      {session.cwd}
+                    </span>
+                  </button>
+                ))}
+              </section>
             ))
           )}
         </div>
+        <footer className="border-t border-border px-3 py-2">
+          <p className="font-mono text-[11px] text-primary">
+            {costThisSession != null
+              ? t("sessionCost", { cost: formatUsd(costThisSession) })
+              : t("noTurnCostYet")}
+          </p>
+          <p className="mt-1 text-[11px] leading-snug text-muted-foreground">{t("balanceNote")}</p>
+        </footer>
       </aside>
 
-      <section className="main">
+      <section className="flex min-w-0 flex-1 flex-col">
+        <PrintModeWarning />
         {view === "settings" ? (
           <SettingsView
             settings={settings}
@@ -180,501 +296,141 @@ export default function App() {
           />
         ) : (
           <>
-            <div className="topbar">
-              <div>
-                <h2>{active?.title ?? "Chat"}</h2>
+            <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
+              <div className="min-w-0">
+                <h2 className="truncate text-[14px]">{active?.title ?? t("startTitle")}</h2>
                 {active && (
-                  <div className="sub">
+                  <p className="truncate font-mono text-[10px] text-muted-foreground">
                     {active.cwd}
-                    {active.cliSessionId
-                      ? ` · resume ${active.cliSessionId.slice(0, 8)}…`
-                      : " · new session"}
-                  </div>
+                    {" · "}
+                    {active.cliSessionId ? t("resumeReady") : t("newSession")}
+                    {costThisSession != null
+                      ? ` · ${t("sessionCost", { cost: formatUsd(costThisSession) })}`
+                      : ""}
+                  </p>
                 )}
               </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span
-                  className={`badge ${keyStatus.configured && detect?.found ? "ok" : "warn"}`}
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Badge className={keyStatus.configured && detect?.found ? "text-primary" : "text-amber-200"}>
+                  {keyStatus.configured ? t("keyOk") : t("noKey")}
+                  {" · "}
+                  {detect?.found ? t("cliOk") : t("cliMissing")}
+                </Badge>
+                <Badge>{t("tools", { preset: active?.allowedToolsPreset ?? settings.allowedToolsPreset })}</Badge>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="min-[821px]:hidden"
+                  aria-label={t("settings")}
+                  onClick={() => setView("settings")}
                 >
-                  {keyStatus.configured ? "key ok" : "no key"} ·{" "}
-                  {detect?.found ? "cli ok" : "cli missing"}
-                </span>
-                <span className="badge">
-                  tools: {active?.allowedToolsPreset ?? settings.allowedToolsPreset}
-                </span>
+                  <Settings className="size-3.5" />
+                </Button>
               </div>
-            </div>
+            </header>
 
-            <div className="chat">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               {!active ? (
-                <div className="empty">
-                  <h3>Start a chat</h3>
-                  <p>
-                    Pick a project folder, send a message, and the app calls{" "}
-                    <code>claude -p … --output-format json</code>. Follow-ups use{" "}
-                    <code>--resume</code>.
-                  </p>
-                  <button
-                    className="btn btn-primary"
-                    style={{ marginTop: 12 }}
-                    onClick={() => setShowNewChat(true)}
-                  >
-                    New chat
-                  </button>
+                <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center px-6 text-center">
+                  <p className="font-mono text-xs uppercase tracking-[0.2em] text-primary">UseUpClaude</p>
+                  <h3 className="mt-3 text-lg">{t("startTitle")}</h3>
+                  <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">{t("startBody")}</p>
+                  <div className="mt-4 flex gap-2">
+                    <Button onClick={() => setShowNewChat(true)}>
+                      <Plus className="size-3.5" />
+                      {t("newChat")}
+                    </Button>
+                    <Button variant="outline" onClick={() => setShowDiscover(true)}>
+                      <Terminal className="size-3.5" />
+                      {t("openClaudeSessions")}
+                    </Button>
+                  </div>
                 </div>
               ) : (
-                active.turns.map((t) => (
-                  <div
-                    key={t.id}
-                    className={`bubble ${t.role} ${t.status === "pending" ? "pending" : ""}`}
-                  >
-                    <span className="role">{t.role}</span>
-                    {t.status === "pending" && !t.content
-                      ? "Waiting for Claude Code…"
-                      : t.content}
-                  </div>
-                ))
+                <>
+                  {bubbles.length === 0 && !busy && (
+                    <p className="mx-auto max-w-xl px-6 pt-8 text-[13px] leading-relaxed text-muted-foreground">
+                      {active.cliSessionId ? t("resumedEmpty") : t("emptyThread")}
+                    </p>
+                  )}
+                  <ChatThread bubbles={bubbles} thinking={busy} />
+                </>
               )}
-              <div ref={chatEndRef} />
             </div>
 
-            <div className="composer">
-              {error && <div className="status-line error">{error}</div>}
+            <form
+              className="shrink-0 border-t border-border bg-background/95 px-4 py-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleSend();
+              }}
+            >
+              {error && <p className="mb-2 text-[13px] text-destructive">{error}</p>}
               {readyHint && !error && (
-                <div className="status-line error">
-                  {readyHint} — open Settings to finish setup.
-                </div>
+                <p className="mb-2 text-[13px] text-destructive">{t("setupHint", { hint: readyHint })}</p>
               )}
-              <div className="composer-row">
-                <textarea
+              <div className="mx-auto flex max-w-3xl items-end gap-2">
+                <Textarea
                   value={prompt}
-                  placeholder={
-                    active
-                      ? "Message Claude Code…"
-                      : "Create a new chat first, or type after picking a folder…"
-                  }
+                  placeholder={active ? t("placeholderActive") : t("placeholderIdle")}
+                  disabled={busy || !!readyHint}
                   onChange={(e) => setPrompt(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault();
                       void handleSend();
                     }
                   }}
-                  disabled={busy || !!readyHint}
                 />
-                <div className="composer-actions">
+                <div className="flex flex-col gap-2">
                   {busy ? (
-                    <button className="btn btn-danger" onClick={() => void handleCancel()}>
-                      Cancel
-                    </button>
+                    <Button type="button" variant="destructive" onClick={() => void api.cancelActive()}>
+                      {t("cancel")}
+                    </Button>
                   ) : (
-                    <button
-                      className="btn btn-primary"
-                      disabled={!prompt.trim() || !!readyHint || (!active && !settings.defaultCwd)}
-                      onClick={() => {
-                        if (!active) {
-                          setShowNewChat(true);
-                          return;
-                        }
-                        void handleSend();
-                      }}
-                    >
-                      Send
-                    </button>
+                    <Button type="submit" disabled={!prompt.trim() || !!readyHint}>
+                      {t("send")}
+                    </Button>
                   )}
                 </div>
               </div>
-              <div className="status-line">Ctrl/⌘+Enter to send · no streaming in MVP</div>
-            </div>
+              <p className="mx-auto mt-2 max-w-3xl font-mono text-[10px] text-muted-foreground">
+                {t("composerHint")}
+              </p>
+            </form>
           </>
         )}
       </section>
 
-      {showNewChat && (
-        <NewChatModal
-          defaultCwd={settings.defaultCwd}
-          defaultModel={settings.model}
-          defaultTools={settings.allowedToolsPreset}
-          onClose={() => setShowNewChat(false)}
-          onCreate={async ({ cwd, model, tools }) => {
-            const session = await api.createSession({
-              cwd,
-              model,
-              allowedToolsPreset: tools,
-            });
-            if (settings.defaultCwd !== cwd) {
-              const next = { ...settings, defaultCwd: cwd };
-              await api.saveSettings(next);
-              setSettings(next);
-            }
-            setActive(session);
-            setShowNewChat(false);
-            setView("chat");
-            await refreshSessions();
-          }}
-        />
-      )}
+      <NewChatDialog
+        open={showNewChat}
+        onOpenChange={setShowNewChat}
+        defaultCwd={settings.defaultCwd}
+        defaultModel={settings.model}
+        defaultTools={settings.allowedToolsPreset}
+        onCreate={async ({ cwd, model, tools }) => {
+          const session = await api.createSession({
+            cwd,
+            model,
+            allowedToolsPreset: tools,
+            title: t("newChat"),
+          });
+          if (settings.defaultCwd !== cwd) {
+            const next = { ...settings, defaultCwd: cwd };
+            await api.saveSettings(next);
+            setSettings(next);
+          }
+          setActive(session);
+          setShowNewChat(false);
+          setView("chat");
+          await refreshSessions();
+        }}
+      />
+      <DiscoverDialog
+        open={showDiscover}
+        onOpenChange={setShowDiscover}
+        onOpenSession={openDiscovered}
+      />
     </div>
-  );
-}
-
-function NewChatModal({
-  defaultCwd,
-  defaultModel,
-  defaultTools,
-  onClose,
-  onCreate,
-}: {
-  defaultCwd: string | null;
-  defaultModel: string | null;
-  defaultTools: string;
-  onClose: () => void;
-  onCreate: (args: {
-    cwd: string;
-    model: string | null;
-    tools: string;
-  }) => Promise<void>;
-}) {
-  const [cwd, setCwd] = useState(defaultCwd ?? "");
-  const [model, setModel] = useState(defaultModel ?? "");
-  const [tools, setTools] = useState(defaultTools || "read");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const pick = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") setCwd(selected);
-  };
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>New chat</h3>
-        <p className="hint">
-          Working directory becomes the Claude Code cwd. Tools default to
-          read-only for MVP.
-        </p>
-        <div className="field">
-          <label>Project folder (cwd)</label>
-          <div className="field-row">
-            <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/project" />
-            <button className="btn" type="button" onClick={() => void pick()}>
-              Browse
-            </button>
-          </div>
-        </div>
-        <div className="field">
-          <label>Model (optional)</label>
-          <input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="Leave blank for CLI default"
-          />
-        </div>
-        <div className="field">
-          <label>Allowed tools</label>
-          <select value={tools} onChange={(e) => setTools(e.target.value)}>
-            <option value="read">Read only (safer)</option>
-            <option value="read_edit">Read + Edit</option>
-            <option value="full">Unrestricted (opt-in)</option>
-          </select>
-        </div>
-        {err && <div className="status-line error">{err}</div>}
-        <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={!cwd.trim() || busy}
-            onClick={() => {
-              setBusy(true);
-              setErr(null);
-              void onCreate({
-                cwd: cwd.trim(),
-                model: model.trim() || null,
-                tools,
-              })
-                .catch((e) => setErr(String(e)))
-                .finally(() => setBusy(false));
-            }}
-          >
-            Create
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SettingsView({
-  settings,
-  keyStatus,
-  detect,
-  onClose,
-  onSaved,
-  onSettings,
-  onKeyStatus,
-  onDetect,
-}: {
-  settings: AppSettings;
-  keyStatus: KeyStatus;
-  detect: ClaudeDetectResult | null;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-  onSettings: (s: AppSettings) => void;
-  onKeyStatus: (k: KeyStatus) => void;
-  onDetect: (d: ClaudeDetectResult) => void;
-}) {
-  const [draft, setDraft] = useState(settings);
-  const [keyInput, setKeyInput] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
-  const [statusKind, setStatusKind] = useState<"ok" | "error" | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [dataDir, setDataDir] = useState<string>("");
-
-  useEffect(() => {
-    void api.dataDir().then(setDataDir).catch(() => undefined);
-  }, []);
-
-  const pickBinary = async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "Binary", extensions: ["*"] }],
-    });
-    if (typeof selected === "string") {
-      setDraft((d) => ({ ...d, claudeBinaryPath: selected }));
-    }
-  };
-
-  const pickCwd = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") {
-      setDraft((d) => ({ ...d, defaultCwd: selected }));
-    }
-  };
-
-  return (
-    <>
-      <div className="topbar">
-        <div>
-          <h2>Settings</h2>
-          <div className="sub">Keys stay in OS secure storage · never logged</div>
-        </div>
-        <button className="btn" onClick={onClose}>
-          Back
-        </button>
-      </div>
-      <div className="chat" style={{ maxWidth: 640 }}>
-        <div className="field">
-          <label>Anthropic API key</label>
-          <input
-            type="password"
-            value={keyInput}
-            onChange={(e) => setKeyInput(e.target.value)}
-            placeholder={
-              keyStatus.configured
-                ? `Saved: ${keyStatus.masked}`
-                : "Paste sk-ant-… then Save"
-            }
-            autoComplete="off"
-          />
-          <div className="field-row" style={{ marginTop: 8 }}>
-            <button
-              className="btn btn-primary"
-              disabled={!keyInput.trim() || busy}
-              onClick={() => {
-                setBusy(true);
-                void api
-                  .saveApiKey(keyInput)
-                  .then((k) => {
-                    onKeyStatus(k);
-                    setKeyInput("");
-                    setStatus("API key saved to OS keychain / credential store");
-                    setStatusKind("ok");
-                  })
-                  .catch((e) => {
-                    setStatus(String(e));
-                    setStatusKind("error");
-                  })
-                  .finally(() => setBusy(false));
-              }}
-            >
-              Save key
-            </button>
-            <button
-              className="btn btn-danger"
-              disabled={!keyStatus.configured || busy}
-              onClick={() => {
-                setBusy(true);
-                void api
-                  .deleteApiKey()
-                  .then((k) => {
-                    onKeyStatus(k);
-                    setStatus("API key deleted");
-                    setStatusKind("ok");
-                  })
-                  .catch((e) => {
-                    setStatus(String(e));
-                    setStatusKind("error");
-                  })
-                  .finally(() => setBusy(false));
-              }}
-            >
-              Delete key
-            </button>
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void api
-                  .testConnection()
-                  .then((r) => {
-                    setStatus(r.message + (r.resultPreview ? ` — ${r.resultPreview}` : ""));
-                    setStatusKind(r.ok ? "ok" : "error");
-                  })
-                  .catch((e) => {
-                    setStatus(String(e));
-                    setStatusKind("error");
-                  })
-                  .finally(() => setBusy(false));
-              }}
-            >
-              Test connection
-            </button>
-          </div>
-        </div>
-
-        <div className="field">
-          <label>claude binary path</label>
-          <div className="field-row">
-            <input
-              value={draft.claudeBinaryPath ?? ""}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  claudeBinaryPath: e.target.value || null,
-                })
-              }
-              placeholder="Auto-detect from PATH if empty"
-            />
-            <button className="btn" onClick={() => void pickBinary()}>
-              Browse
-            </button>
-            <button
-              className="btn"
-              onClick={() => {
-                void api.detectClaude().then((d) => {
-                  onDetect(d);
-                  setStatus(
-                    d.found
-                      ? `Found: ${d.path}${d.version ? ` (${d.version})` : ""}`
-                      : d.error ?? "Not found",
-                  );
-                  setStatusKind(d.found ? "ok" : "error");
-                });
-              }}
-            >
-              Detect
-            </button>
-          </div>
-          {detect && (
-            <div className={`status-line ${detect.found ? "ok" : "error"}`}>
-              {detect.found
-                ? `Detected ${detect.path}${detect.version ? ` · ${detect.version}` : ""}`
-                : detect.error}
-            </div>
-          )}
-        </div>
-
-        <div className="field">
-          <label>Default project folder</label>
-          <div className="field-row">
-            <input
-              value={draft.defaultCwd ?? ""}
-              onChange={(e) =>
-                setDraft({ ...draft, defaultCwd: e.target.value || null })
-              }
-            />
-            <button className="btn" onClick={() => void pickCwd()}>
-              Browse
-            </button>
-          </div>
-        </div>
-
-        <div className="field">
-          <label>Default model (optional)</label>
-          <input
-            value={draft.model ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, model: e.target.value || null })
-            }
-            placeholder="CLI default"
-          />
-        </div>
-
-        <div className="field">
-          <label>Default allowed tools</label>
-          <select
-            value={draft.allowedToolsPreset}
-            onChange={(e) =>
-              setDraft({ ...draft, allowedToolsPreset: e.target.value })
-            }
-          >
-            <option value="read">Read only (safer)</option>
-            <option value="read_edit">Read + Edit</option>
-            <option value="full">Unrestricted</option>
-          </select>
-        </div>
-
-        <div className="field">
-          <label>Timeout (seconds)</label>
-          <input
-            type="number"
-            min={30}
-            value={draft.timeoutSecs}
-            onChange={(e) =>
-              setDraft({
-                ...draft,
-                timeoutSecs: Number(e.target.value) || 1800,
-              })
-            }
-          />
-        </div>
-
-        {dataDir && (
-          <p className="status-line">Local history: {dataDir}</p>
-        )}
-        {status && (
-          <div className={`status-line ${statusKind ?? ""}`}>{status}</div>
-        )}
-
-        <div className="modal-actions" style={{ justifyContent: "flex-start" }}>
-          <button
-            className="btn btn-primary"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void api
-                .saveSettings(draft)
-                .then(async (s) => {
-                  onSettings(s);
-                  setStatus("Settings saved");
-                  setStatusKind("ok");
-                  await onSaved();
-                })
-                .catch((e) => {
-                  setStatus(String(e));
-                  setStatusKind("error");
-                })
-                .finally(() => setBusy(false));
-            }}
-          >
-            Save settings
-          </button>
-        </div>
-      </div>
-    </>
   );
 }

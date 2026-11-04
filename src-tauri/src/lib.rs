@@ -1,4 +1,5 @@
 mod cli;
+mod discover;
 mod models;
 mod secrets;
 mod store;
@@ -75,7 +76,7 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, Stri
 
 #[tauri::command]
 fn get_session(state: State<'_, AppState>, id: Uuid) -> Result<GuiSession, String> {
-    state.store.get_session(id).map_err(err)
+    load_session(&state, id)
 }
 
 #[tauri::command]
@@ -89,14 +90,28 @@ fn create_session(
     cwd: String,
     model: Option<String>,
     allowed_tools_preset: Option<String>,
+    cli_session_id: Option<String>,
+    title: Option<String>,
 ) -> Result<GuiSession, String> {
     let settings = state.store.load_settings().map_err(err)?;
     let now = Utc::now();
+    let cli_session_id = match cli_session_id {
+        Some(raw) if !raw.trim().is_empty() => Some(
+            Uuid::parse_str(raw.trim())
+                .map_err(|_| "Claude session id must be a UUID".to_string())?
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let title = title
+        .map(|t| truncate(t.trim(), 80))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "New chat".into());
     let session = GuiSession {
         id: Uuid::new_v4(),
-        cli_session_id: None,
+        cli_session_id,
         cwd,
-        title: "New chat".into(),
+        title,
         model: model.or(settings.model),
         allowed_tools_preset: allowed_tools_preset
             .unwrap_or(settings.allowed_tools_preset),
@@ -106,6 +121,11 @@ fn create_session(
     };
     state.store.save_session(&session).map_err(err)?;
     Ok(session)
+}
+
+#[tauri::command]
+fn discover_claude_sessions() -> Vec<DiscoveredProject> {
+    discover::discover_claude_sessions()
 }
 
 #[tauri::command]
@@ -156,7 +176,8 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
     .await
     .map_err(err)?;
 
-    let ok = out.exit_code == 0
+    let ok = out.parse_ok
+        && out.exit_code == 0
         && out
             .parsed
             .as_ref()
@@ -197,7 +218,7 @@ async fn send_message(
     let binary = cli::resolve_binary(settings.claude_binary_path.as_deref()).map_err(err)?;
 
     let mut session = if let Some(id) = request.session_id {
-        state.store.get_session(id).map_err(err)?
+        load_session(&state, id)?
     } else {
         let cwd = request
             .cwd
@@ -216,7 +237,12 @@ async fn send_message(
         .map_err(err)?
     };
 
-    if session.title == "New chat" {
+    let fresh_gui_chat = session.cli_session_id.is_none()
+        && !session
+            .turns
+            .iter()
+            .any(|t| matches!(t.role, TurnRole::User));
+    if fresh_gui_chat {
         session.title = truncate(&prompt, 60);
     }
 
@@ -229,6 +255,7 @@ async fn send_message(
         started_at: now,
         finished_at: Some(now),
         status: TurnStatus::Done,
+        cost_usd: None,
     };
     session.turns.push(user_turn);
 
@@ -240,6 +267,7 @@ async fn send_message(
         started_at: Utc::now(),
         finished_at: None,
         status: TurnStatus::Pending,
+        cost_usd: None,
     };
     let pending_id = pending.id;
     session.turns.push(pending);
@@ -278,7 +306,8 @@ async fn send_message(
 
     match run {
         Ok(out) => {
-            let is_cli_error = out.exit_code != 0
+            let is_cli_error = !out.parse_ok
+                || out.exit_code != 0
                 || out
                     .parsed
                     .as_ref()
@@ -295,23 +324,20 @@ async fn send_message(
                 .find(|t| t.id == pending_id)
                 .ok_or_else(|| "pending turn missing".to_string())?;
 
+            let mut content = redact_secrets(&out.result_text);
+            if content.trim().is_empty() {
+                content = format!("Claude CLI failed (exit {}).", out.exit_code);
+            }
+
             if is_cli_error {
                 turn.role = TurnRole::Error;
                 turn.status = TurnStatus::Failed;
-                turn.content = if out.result_text.trim().is_empty() {
-                    format!(
-                        "CLI failed (exit {}). {}",
-                        out.exit_code,
-                        redact_secrets(&out.stderr)
-                    )
-                } else {
-                    out.result_text.clone()
-                };
             } else {
                 turn.role = TurnRole::Assistant;
                 turn.status = TurnStatus::Done;
-                turn.content = out.result_text.clone();
             }
+            turn.content = content;
+            turn.cost_usd = out.total_cost_usd;
             turn.exit_code = Some(out.exit_code);
             turn.finished_at = Some(Utc::now());
 
@@ -344,6 +370,55 @@ async fn cancel_active(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn data_dir(state: State<'_, AppState>) -> String {
     state.store.data_root().display().to_string()
+}
+
+fn load_session(state: &AppState, id: Uuid) -> Result<GuiSession, String> {
+    let mut session = state.store.get_session(id).map_err(err)?;
+    if sanitize_session(&mut session) {
+        state.store.save_session(&session).map_err(err)?;
+    }
+    Ok(session)
+}
+
+/// Older builds stored the raw `--output-format json` object as the assistant
+/// message. Keep `session_id` for `--resume` and show `result` instead.
+fn sanitize_session(session: &mut GuiSession) -> bool {
+    let mut changed = false;
+    let mut recovered_session: Option<String> = None;
+    let missing_cli_session = session.cli_session_id.is_none();
+    for turn in &mut session.turns {
+        if !matches!(turn.role, TurnRole::Assistant | TurnRole::Error) {
+            continue;
+        }
+        let Some(env) = cli::envelope_if_whole_document(&turn.content) else {
+            continue;
+        };
+        if turn.content != env.result_text {
+            turn.content = env.result_text;
+            changed = true;
+        }
+        if turn.cost_usd.is_none() && env.total_cost_usd.is_some() {
+            turn.cost_usd = env.total_cost_usd;
+            changed = true;
+        }
+        if env.is_error && turn.role != TurnRole::Error {
+            turn.role = TurnRole::Error;
+            turn.status = TurnStatus::Failed;
+            changed = true;
+        }
+        if missing_cli_session {
+            if let Some(sid) = env.session_id {
+                recovered_session = Some(sid);
+            }
+        }
+    }
+    if missing_cli_session {
+        if let Some(sid) = recovered_session {
+            session.cli_session_id = Some(sid);
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn create_session_inner(
@@ -435,6 +510,7 @@ pub fn run() {
             get_session,
             delete_session,
             create_session,
+            discover_claude_sessions,
             test_connection,
             send_message,
             cancel_active,

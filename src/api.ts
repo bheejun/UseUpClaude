@@ -3,6 +3,7 @@ import type {
   AppSettings,
   ClaudeDetectResult,
   ConnectionTestResult,
+  DiscoveredProject,
   GuiSession,
   KeyStatus,
   SendMessageResponse,
@@ -24,7 +25,10 @@ export const api = {
     cwd: string;
     model?: string | null;
     allowedToolsPreset?: string | null;
+    cliSessionId?: string | null;
+    title?: string | null;
   }) => invoke<GuiSession>("create_session", args),
+  discoverClaudeSessions: () => invoke<DiscoveredProject[]>("discover_claude_sessions"),
   testConnection: () => invoke<ConnectionTestResult>("test_connection"),
   sendMessage: (request: {
     sessionId?: string | null;

@@ -17,6 +17,8 @@ export interface GuiTurn {
   startedAt: string;
   finishedAt: string | null;
   status: TurnStatus;
+  /** This turn's CLI total_cost_usd, when reported. */
+  costUsd?: number | null;
 }
 
 export interface GuiSession {
@@ -65,4 +67,16 @@ export interface ConnectionTestResult {
 export interface SendMessageResponse {
   session: GuiSession;
   assistantTurn: GuiTurn;
+}
+
+export interface DiscoveredSession {
+  sessionId: string;
+  title: string;
+  modifiedMs: number;
+}
+
+export interface DiscoveredProject {
+  cwd: string | null;
+  label: string;
+  sessions: DiscoveredSession[];
 }
