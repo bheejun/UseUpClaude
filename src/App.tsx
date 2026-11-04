@@ -5,7 +5,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
-import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort } from "@/components/model-select";
+import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
@@ -241,12 +241,20 @@ export default function App() {
   const chooseModel = (model: string | null) => {
     if (!active) return;
     const id = active.id;
-    setActive((current) => (current && current.id === id ? { ...current, model } : current));
+    const fastMode = supportsFastMode(model) ? active.fastMode : false;
+    setActive((current) => (current && current.id === id ? { ...current, model, fastMode } : current));
     queueComposer(async () => {
       const session = await api.setSessionModel(id, model);
+      if (!supportsFastMode(model) && session.fastMode) {
+        await api.setSessionFastMode(id, false);
+      }
       setActive((current) => {
         if (!current || current.id !== id || current.model !== model) return current;
-        return { ...current, model: session.model };
+        return {
+          ...current,
+          model: session.model,
+          fastMode: supportsFastMode(current.model) ? current.fastMode : false,
+        };
       });
     });
   };
@@ -329,7 +337,7 @@ export default function App() {
         cwd: active.cwd,
         model: active.model,
         effort: normalizeEffort(active.effort),
-        fastMode: active.fastMode,
+        fastMode: supportsFastMode(active.model) && active.fastMode,
         allowedToolsPreset: active.allowedToolsPreset,
         skill: chosen?.name ?? null,
       });
@@ -395,6 +403,11 @@ export default function App() {
   }, [visible]);
 
   const sessionBusy = !!active && busyIds.has(active.id);
+
+  useEffect(() => {
+    if (!active || sessionBusy || !active.fastMode || supportsFastMode(active.model)) return;
+    chooseFastMode(false);
+  }, [active?.id, active?.model, active?.fastMode, sessionBusy]);
 
   const bubbles: Bubble[] = useMemo(() => {
     const turns = active?.turns ?? [];
@@ -695,17 +708,19 @@ export default function App() {
                   className="h-8 w-[148px] rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                   onChange={chooseEffort}
                 />
-                <label htmlFor="composer-fast-mode" className="inline-flex items-center gap-2 text-[12px] text-muted-foreground">
-                  <input
-                    id="composer-fast-mode"
-                    type="checkbox"
-                    className="size-3.5 accent-primary disabled:opacity-50"
-                    checked={!!active?.fastMode}
-                    disabled={!active || sessionBusy}
-                    onChange={(e) => chooseFastMode(e.target.checked)}
-                  />
-                  {t("fastMode")}
-                </label>
+                {supportsFastMode(active?.model) && (
+                  <label htmlFor="composer-fast-mode" className="inline-flex items-center gap-2 text-[12px] text-muted-foreground">
+                    <input
+                      id="composer-fast-mode"
+                      type="checkbox"
+                      className="size-3.5 accent-primary disabled:opacity-50"
+                      checked={!!active?.fastMode}
+                      disabled={!active || sessionBusy}
+                      onChange={(e) => chooseFastMode(e.target.checked)}
+                    />
+                    {t("fastMode")}
+                  </label>
+                )}
                 <p className="text-[11px] text-muted-foreground">{t("modelHint")}</p>
                 <p className="text-[11px] text-muted-foreground">{t("effortHint")}</p>
               </div>

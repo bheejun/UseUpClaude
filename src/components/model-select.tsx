@@ -21,6 +21,13 @@ export function normalizeEffort(value: string | null | undefined): EffortLevel |
   return (EFFORT_LEVELS as readonly string[]).includes(level) ? (level as EffortLevel) : null;
 }
 
+const FAST_MODE_MODEL_IDS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]);
+
+export function supportsFastMode(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  return FAST_MODE_MODEL_IDS.has(modelId.trim().toLowerCase());
+}
+
 export function ModelSelect({
   id,
   value,
