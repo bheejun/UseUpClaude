@@ -1,5 +1,14 @@
 export type TurnRole = "user" | "assistant" | "system" | "error";
 export type TurnStatus = "pending" | "done" | "failed" | "cancelled";
+export type TurnEventKind = "tool_use" | "tool_result";
+
+export interface TurnEvent {
+  kind: TurnEventKind;
+  toolUseId: string;
+  name: string;
+  isError: boolean;
+  preview: string;
+}
 
 export interface AppSettings {
   claudeBinaryPath: string | null;
@@ -19,6 +28,8 @@ export interface GuiTurn {
   status: TurnStatus;
   /** This turn's own cost in USD. Not the CLI session running total. */
   costUsd?: number | null;
+  /** Completed tool calls from this turn. `content` stays the result text. */
+  events?: TurnEvent[];
 }
 
 export interface GuiSession {

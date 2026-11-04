@@ -43,6 +43,23 @@ pub enum TurnStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEventKind {
+    ToolUse,
+    ToolResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnEvent {
+    pub kind: TurnEventKind,
+    pub tool_use_id: String,
+    pub name: String,
+    pub is_error: bool,
+    pub preview: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiTurn {
@@ -56,6 +73,9 @@ pub struct GuiTurn {
     /// Cost of this turn only. Not the CLI session's running total.
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    /// Completed tool calls from this turn. `content` stays the result text.
+    #[serde(default)]
+    pub events: Vec<TurnEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

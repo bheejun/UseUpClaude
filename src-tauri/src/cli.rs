@@ -1,13 +1,13 @@
-use crate::models::{ClaudeDetectResult, ClaudeJsonOutput, CliEnvelope};
-use serde_json::Value;
+use crate::models::{ClaudeDetectResult, ClaudeJsonOutput, CliEnvelope, TurnEvent, TurnEventKind};
 use crate::secrets;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -171,7 +171,8 @@ fn print_mode_args(
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
-        "json".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
     ];
     args.extend(permission_args(tools));
     if let Some(id) = resume {
@@ -304,6 +305,13 @@ pub struct RunOutput {
     pub session_id: Option<String>,
     pub total_cost_usd: Option<f64>,
     pub parse_ok: bool,
+    pub events: Vec<TurnEvent>,
+}
+
+#[derive(Default)]
+struct StreamParse {
+    events: Vec<TurnEvent>,
+    envelope: Option<CliEnvelope>,
 }
 
 pub async fn run_claude_managed(
@@ -341,7 +349,7 @@ pub async fn run_claude_managed(
 
     let mut child = cmd.spawn()?;
 
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| CliError::Message("failed to capture stdout".into()))?;
@@ -354,9 +362,25 @@ pub async fn run_claude_managed(
     *active.child.lock().await = Some(child);
 
     let out_task = async {
-        let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf).await.map_err(CliError::from)?;
-        Ok::<_, CliError>(String::from_utf8_lossy(&buf).to_string())
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut line_bytes = Vec::new();
+        let mut raw_bytes = Vec::new();
+        let mut streamed = StreamParse::default();
+        loop {
+            line_bytes.clear();
+            let n = reader
+                .read_until(b'\n', &mut line_bytes)
+                .await
+                .map_err(CliError::from)?;
+            if n == 0 {
+                break;
+            }
+            raw_bytes.extend_from_slice(&line_bytes);
+            let line = String::from_utf8_lossy(&line_bytes);
+            ingest_stdout_line(&mut streamed, &line);
+        }
+        let raw = String::from_utf8_lossy(&raw_bytes).into_owned();
+        Ok::<_, CliError>((raw, streamed))
     };
     let err_task = async {
         let mut buf = Vec::new();
@@ -418,44 +442,203 @@ pub async fn run_claude_managed(
             Err(CliError::TimedOut(spec.timeout_secs))
         }
         Ok(Err(e)) => Err(e),
-        Ok(Ok((stdout, stderr, exit_code, ()))) => {
+        Ok(Ok(((stdout, streamed), stderr, exit_code, ()))) => {
             *active.child.lock().await = None;
-            Ok(parse_output(exit_code, stdout, stderr))
+            Ok(finish_run_output(exit_code, &stdout, &stderr, streamed))
         }
     }
 }
 
+#[cfg(test)]
 fn parse_output(exit_code: i32, stdout: String, stderr: String) -> RunOutput {
-    // Parse the root object. The last `{` is often inside `usage`, and taking
-    // that slice drops `result` / `session_id` and leaks the envelope into chat.
-    if let Some(env) = interpret_cli_text(&stdout) {
-        let parsed = ClaudeJsonOutput {
-            session_id: env.session_id.clone(),
-            result: Some(Value::String(env.result_text.clone())),
-            is_error: Some(env.is_error),
-            error: None,
-            subtype: None,
-            total_cost_usd: env.total_cost_usd,
-        };
-        return RunOutput {
-            exit_code,
-            session_id: env.session_id,
-            total_cost_usd: env.total_cost_usd,
-            result_text: env.result_text,
-            parsed: Some(parsed),
-            parse_ok: true,
-        };
-    }
+    finish_run_output(exit_code, &stdout, &stderr, parse_stream(&stdout))
+}
 
-    let result_text = fallback_message(exit_code, &stdout, &stderr);
+fn finish_run_output(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+    streamed: StreamParse,
+) -> RunOutput {
+    let StreamParse { events, envelope } = streamed;
+    // A result line wins. Pretty-printed `--output-format json` still has no
+    // one-line objects, so the whole-document scan remains the fallback.
+    if let Some(env) = envelope.or_else(|| interpret_cli_text(stdout)) {
+        return output_from_envelope(exit_code, env, events);
+    }
     RunOutput {
         exit_code,
         parsed: None,
-        result_text,
+        result_text: fallback_message(exit_code, stdout, stderr),
         session_id: None,
         total_cost_usd: None,
         parse_ok: false,
+        events,
     }
+}
+
+fn output_from_envelope(exit_code: i32, env: CliEnvelope, events: Vec<TurnEvent>) -> RunOutput {
+    let parsed = ClaudeJsonOutput {
+        session_id: env.session_id.clone(),
+        result: Some(Value::String(env.result_text.clone())),
+        is_error: Some(env.is_error),
+        error: None,
+        subtype: None,
+        total_cost_usd: env.total_cost_usd,
+    };
+    RunOutput {
+        exit_code,
+        session_id: env.session_id,
+        total_cost_usd: env.total_cost_usd,
+        result_text: env.result_text,
+        parsed: Some(parsed),
+        parse_ok: true,
+        events,
+    }
+}
+
+#[cfg(test)]
+fn parse_stream(stdout: &str) -> StreamParse {
+    let mut streamed = StreamParse::default();
+    for line in stdout.lines() {
+        ingest_stdout_line(&mut streamed, line);
+    }
+    streamed
+}
+
+const PREVIEW_MAX_BYTES: usize = 8192;
+
+fn ingest_stdout_line(state: &mut StreamParse, line: &str) {
+    let trimmed = line.trim().trim_start_matches('\u{feff}');
+    if trimmed.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return;
+    };
+    match value.get("type").and_then(Value::as_str) {
+        Some("assistant") => push_tool_blocks(state, &value, TurnEventKind::ToolUse),
+        Some("user") => push_tool_blocks(state, &value, TurnEventKind::ToolResult),
+        Some("result") => {
+            if let Some(env) = envelope_from_value(&value) {
+                state.envelope = Some(env);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind) {
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let block_type = match kind {
+        TurnEventKind::ToolUse => "tool_use",
+        TurnEventKind::ToolResult => "tool_result",
+    };
+    for block in blocks {
+        let Some(block) = block.as_object() else {
+            continue;
+        };
+        if block.get("type").and_then(Value::as_str) != Some(block_type) {
+            continue;
+        }
+        match kind {
+            TurnEventKind::ToolUse => {
+                state.events.push(TurnEvent {
+                    kind,
+                    tool_use_id: json_string(block, "id"),
+                    name: json_string(block, "name"),
+                    is_error: false,
+                    preview: cut_preview(&json_preview(block.get("input"))),
+                });
+            }
+            TurnEventKind::ToolResult => {
+                let tool_use_id = json_string(block, "tool_use_id");
+                let name = tool_name_for_id(state, &tool_use_id);
+                let is_error = block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                state.events.push(TurnEvent {
+                    kind,
+                    tool_use_id,
+                    name,
+                    is_error,
+                    preview: cut_preview(&content_preview(block.get("content"))),
+                });
+            }
+        }
+    }
+}
+
+fn tool_name_for_id(state: &StreamParse, tool_use_id: &str) -> String {
+    if tool_use_id.is_empty() {
+        return String::new();
+    }
+    state
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == TurnEventKind::ToolUse && event.tool_use_id == tool_use_id)
+        .map(|event| event.name.clone())
+        .unwrap_or_default()
+}
+
+fn json_string(obj: &serde_json::Map<String, Value>, key: &str) -> String {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn json_preview(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn content_preview(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| content_preview(Some(item)))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(""),
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                return text.to_string();
+            }
+            if map.contains_key("content") {
+                return content_preview(map.get("content"));
+            }
+            value.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+fn cut_preview(text: &str) -> String {
+    if text.len() <= PREVIEW_MAX_BYTES {
+        return text.to_string();
+    }
+    let mut end = PREVIEW_MAX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// Find a CLI result envelope in process stdout.
@@ -514,13 +697,16 @@ fn envelope_from_value(value: &Value) -> Option<CliEnvelope> {
 
     let result = obj.get("result").and_then(value_as_message);
     let error = obj.get("error").and_then(value_as_message);
+    let errors = obj.get("errors").and_then(joined_errors);
+    let subtype = obj.get("subtype").and_then(Value::as_str);
     let is_error = obj
         .get("is_error")
         .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .unwrap_or_else(|| subtype_is_error(subtype));
     let result_text = result
         .filter(|s| !s.is_empty())
         .or(error.filter(|s| !s.is_empty()))
+        .or(errors)
         .unwrap_or_else(|| {
             if is_error {
                 "Claude returned an error.".to_string()
@@ -542,6 +728,33 @@ fn envelope_from_value(value: &Value) -> Option<CliEnvelope> {
         total_cost_usd: obj.get("total_cost_usd").and_then(value_as_f64),
         is_error,
     })
+}
+
+fn subtype_is_error(subtype: Option<&str>) -> bool {
+    matches!(
+        subtype,
+        Some(
+            "error_during_execution"
+                | "error_max_turns"
+                | "error_max_budget_usd"
+                | "error_max_structured_output_retries"
+        )
+    )
+}
+
+fn joined_errors(value: &Value) -> Option<String> {
+    let parts: Vec<&str> = value
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
 }
 
 fn value_as_message(value: &Value) -> Option<String> {
@@ -670,6 +883,8 @@ pub async fn cancel_run(active: &ActiveRun) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::TurnEventKind;
+    use serde_json::{json, Value};
 
     fn sample_envelope() -> String {
         r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":12,"result":"Hello\nworld","session_id":"abc-123","total_cost_usd":0.0123,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":0}}}"#.to_string()
@@ -859,8 +1074,12 @@ mod tests {
         assert_eq!(settings, r#"{"fastMode": true}"#);
         assert!(!settings.contains('/') && !settings.contains('\\'));
         assert!(args.iter().any(|arg| arg == "-p"));
-        assert!(args.iter().any(|arg| arg == "--output-format"));
-        assert!(!args.iter().any(|arg| arg.contains("hello") || arg.contains('&')));
+        assert!(pair(&args, "--output-format", "stream-json"));
+        assert!(args.iter().any(|arg| arg == "--verbose"));
+        assert!(!args.iter().any(|arg| arg == "--include-partial-messages"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == &prompt || arg.contains("hello") || arg.contains('&')));
         assert!(args.iter().map(|arg| arg.len()).sum::<usize>() < 8_191);
         assert!(prompt.len() > 8_191);
         let no_model = print_mode_args(None, Some(""), "full", Some("nope"), false);
@@ -869,6 +1088,11 @@ mod tests {
         assert!(!no_model.iter().any(|arg| arg == "--settings"));
         assert!(no_model.iter().any(|arg| arg == "--dangerously-skip-permissions"));
         assert!(!no_model.iter().any(|arg| arg == "--resume"));
+        assert!(pair(&no_model, "--output-format", "stream-json"));
+        assert!(no_model.iter().any(|arg| arg == "--verbose"));
+        assert!(!no_model
+            .iter()
+            .any(|arg| arg == "--include-partial-messages"));
         let defaults = print_mode_args(None, None, "read", None, false);
         assert!(!defaults.iter().any(|arg| arg == "--effort" || arg == "--settings"));
         for level in ["low", "medium", "high", "xhigh", "max"] {
@@ -879,5 +1103,152 @@ mod tests {
         }
         assert!(normalize_effort(Some("  xhigh ")).as_deref() == Some("xhigh"));
         assert!(normalize_effort(None).is_none());
+    }
+
+    #[test]
+    fn stream_lines_keep_result_cost_and_tool_events() {
+        let long = format!("{}€", "y".repeat(8191));
+        let stdout = ndjson(&[
+            json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "init-sid",
+                "total_cost_usd": 99
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "calling the tool"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Read",
+                            "input": {"path": "a.txt"}
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "is_error": true,
+                        "content": long
+                    }]
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_3",
+                        "name": "Grep",
+                        "input": {"pattern": "x"}
+                    }]
+                }
+            }),
+            json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_3",
+                        "content": [{"type": "text", "text": "from-blocks"}]
+                    }]
+                }
+            }),
+            json!({"type": "not_a_real_event", "text": "ignore me"}),
+            json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "result": "Done now",
+                "session_id": "sess-9",
+                "total_cost_usd": 1.5
+            }),
+            json!({"type": "rate_limit_event", "status": "ok"}),
+        ]);
+        let out = parse_output(0, stdout, String::new());
+        assert!(out.parse_ok);
+        assert_eq!(out.result_text, "Done now");
+        assert!(!out.result_text.contains("calling the tool"));
+        assert!(!out.result_text.contains("yyyy"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-9"));
+        assert_eq!(out.total_cost_usd, Some(1.5));
+        assert_eq!(out.events.len(), 4);
+        assert_eq!(out.events[0].kind, TurnEventKind::ToolUse);
+        assert_eq!(out.events[0].tool_use_id, "toolu_1");
+        assert_eq!(out.events[0].name, "Read");
+        assert!(!out.events[0].is_error);
+        assert_eq!(out.events[0].preview, r#"{"path":"a.txt"}"#);
+        assert_eq!(out.events[1].kind, TurnEventKind::ToolResult);
+        assert_eq!(out.events[1].tool_use_id, "toolu_1");
+        assert_eq!(out.events[1].name, "Read");
+        assert!(out.events[1].is_error);
+        assert_eq!(out.events[1].preview, "y".repeat(8191));
+        assert!(out.events[1].preview.len() <= 8192);
+        assert!(!out.events[1].preview.contains('€'));
+        let wire = serde_json::to_value(&out.events).unwrap();
+        assert_eq!(wire[0]["kind"], "tool_use");
+        assert_eq!(wire[0]["toolUseId"], "toolu_1");
+        assert_eq!(wire[0]["name"], "Read");
+        assert_eq!(wire[0]["isError"], false);
+        assert_eq!(wire[1]["kind"], "tool_result");
+        assert_eq!(wire[1]["toolUseId"], "toolu_1");
+        assert_eq!(wire[1]["isError"], true);
+        assert_eq!(out.events[2].kind, TurnEventKind::ToolUse);
+        assert_eq!(out.events[2].name, "Grep");
+        assert_eq!(out.events[3].kind, TurnEventKind::ToolResult);
+        assert_eq!(out.events[3].tool_use_id, "toolu_3");
+        assert_eq!(out.events[3].name, "Grep");
+        assert!(!out.events[3].is_error);
+        assert_eq!(out.events[3].preview, "from-blocks");
+
+        let failed = parse_output(
+            1,
+            ndjson(&[
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "toolu_2",
+                            "name": "Bash",
+                            "input": {}
+                        }]
+                    }
+                }),
+                json!({
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": true,
+                    "errors": ["disk full", "gave up"],
+                    "session_id": "err-1",
+                    "total_cost_usd": 0.25
+                }),
+                json!({"type": "system", "subtype": "status"}),
+            ]),
+            String::new(),
+        );
+        assert!(failed.parse_ok);
+        assert_eq!(failed.result_text, "disk full\ngave up");
+        assert!(!failed.result_text.contains('{'));
+        assert_eq!(failed.session_id.as_deref(), Some("err-1"));
+        assert_eq!(failed.total_cost_usd, Some(0.25));
+        assert_eq!(failed.parsed.unwrap().is_error, Some(true));
+        assert_eq!(failed.events.len(), 1);
+        assert_eq!(failed.events[0].kind, TurnEventKind::ToolUse);
+        assert_eq!(failed.events[0].name, "Bash");
+        assert_eq!(failed.events[0].tool_use_id, "toolu_2");
+    }
+
+    fn ndjson(lines: &[Value]) -> String {
+        lines.iter().map(|line| format!("{line}\n")).collect()
     }
 }
