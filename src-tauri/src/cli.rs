@@ -317,6 +317,7 @@ struct StreamParse {
 pub async fn run_claude_managed(
     spec: RunSpec<'_>,
     active: Arc<ActiveRun>,
+    on_event: &(dyn Fn(&TurnEvent) + Send + Sync),
 ) -> Result<RunOutput, CliError> {
     active.cancel_flag.store(false, Ordering::SeqCst);
 
@@ -377,7 +378,9 @@ pub async fn run_claude_managed(
             }
             raw_bytes.extend_from_slice(&line_bytes);
             let line = String::from_utf8_lossy(&line_bytes);
-            ingest_stdout_line(&mut streamed, &line);
+            for event in ingest_stdout_line(&mut streamed, &line) {
+                on_event(&event);
+            }
         }
         let raw = String::from_utf8_lossy(&raw_bytes).into_owned();
         Ok::<_, CliError>((raw, streamed))
@@ -508,13 +511,14 @@ fn parse_stream(stdout: &str) -> StreamParse {
 
 const PREVIEW_MAX_BYTES: usize = 8192;
 
-fn ingest_stdout_line(state: &mut StreamParse, line: &str) {
+fn ingest_stdout_line(state: &mut StreamParse, line: &str) -> Vec<TurnEvent> {
+    let start = state.events.len();
     let trimmed = line.trim().trim_start_matches('\u{feff}');
     if trimmed.is_empty() {
-        return;
+        return Vec::new();
     }
     let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-        return;
+        return Vec::new();
     };
     match value.get("type").and_then(Value::as_str) {
         Some("assistant") => push_tool_blocks(state, &value, TurnEventKind::ToolUse),
@@ -526,6 +530,7 @@ fn ingest_stdout_line(state: &mut StreamParse, line: &str) {
         }
         _ => {}
     }
+    state.events[start..].to_vec()
 }
 
 fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind) {

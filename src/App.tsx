@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
-import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort } from "@/components/model-select";
+import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
@@ -19,11 +20,13 @@ import type {
   AppSettings,
   ClaudeDetectResult,
   GuiSession,
+  GuiTurn,
   KeyStatus,
   ModelCatalog,
   ProjectSkill,
   SessionCostReport,
   SessionSummary,
+  TurnEvent,
 } from "@/types";
 
 type View = "chat" | "settings";
@@ -35,6 +38,31 @@ const DEFAULT_SETTINGS: AppSettings = {
   timeoutSecs: 1800,
   allowedToolsPreset: "read",
 };
+
+type TurnEventPayload = TurnEvent & { sessionId: string };
+
+function withPendingEvents(session: GuiSession, events: TurnEvent[]): GuiSession {
+  if (events.length === 0) return session;
+  const turns = [...session.turns];
+  const index = turns.findIndex((turn) => turn.status === "pending");
+  const pending: GuiTurn =
+    index === -1
+      ? {
+          id: `pending-${session.id}`,
+          role: "assistant",
+          content: "",
+          exitCode: null,
+          startedAt: new Date().toISOString(),
+          finishedAt: null,
+          status: "pending",
+          costUsd: null,
+          events: [...events],
+        }
+      : { ...turns[index], events: [...events] };
+  if (index === -1) turns.push(pending);
+  else turns[index] = pending;
+  return { ...session, turns };
+}
 
 function EntryNotices() {
   const { t } = useI18n();
@@ -65,6 +93,7 @@ export default function App() {
   const composerWrite = useRef(Promise.resolve());
   const focusId = useRef<string | null>(null);
   const busyRef = useRef(new Set<string>());
+  const liveEvents = useRef(new Map<string, TurnEvent[]>());
   const [draft, setDraft] = useState<{ sessionId: string; text: string } | null>(null);
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
@@ -148,8 +177,12 @@ export default function App() {
     setError(null);
     setView("chat");
     try {
-      const session = await api.getSession(id);
+      let session = await api.getSession(id);
       if (focusId.current !== id) return;
+      if (busyRef.current.has(id)) {
+        const events = liveEvents.current.get(id);
+        if (events?.length) session = withPendingEvents(session, events);
+      }
       setActive(session);
     } catch (e) {
       if (focusId.current === id) setError(String(e));
@@ -208,12 +241,20 @@ export default function App() {
   const chooseModel = (model: string | null) => {
     if (!active) return;
     const id = active.id;
-    setActive((current) => (current && current.id === id ? { ...current, model } : current));
+    const fastMode = supportsFastMode(model) ? active.fastMode : false;
+    setActive((current) => (current && current.id === id ? { ...current, model, fastMode } : current));
     queueComposer(async () => {
       const session = await api.setSessionModel(id, model);
+      if (!supportsFastMode(model) && session.fastMode) {
+        await api.setSessionFastMode(id, false);
+      }
       setActive((current) => {
         if (!current || current.id !== id || current.model !== model) return current;
-        return { ...current, model: session.model };
+        return {
+          ...current,
+          model: session.model,
+          fastMode: supportsFastMode(current.model) ? current.fastMode : false,
+        };
       });
     });
   };
@@ -263,6 +304,7 @@ export default function App() {
     if ((!text && !chosen) || busyRef.current.has(sessionId) || readyHint) return;
     busyRef.current.add(sessionId);
     setBusyIds(new Set(busyRef.current));
+    liveEvents.current.set(sessionId, []);
     setError(null);
     setPrompt("");
     setSkill(null);
@@ -270,7 +312,24 @@ export default function App() {
       sessionId,
       text: chosen ? (text ? `/${chosen.name}\n${text}` : `/${chosen.name}`) : text,
     });
+    let unlisten: UnlistenFn | undefined;
     try {
+      unlisten = await listen<TurnEventPayload>("turn-event", (message) => {
+        if (message.payload.sessionId !== sessionId || !busyRef.current.has(sessionId)) return;
+        const event: TurnEvent = {
+          kind: message.payload.kind,
+          toolUseId: message.payload.toolUseId,
+          name: message.payload.name,
+          isError: message.payload.isError,
+          preview: message.payload.preview,
+        };
+        const next = [...(liveEvents.current.get(sessionId) ?? []), event];
+        liveEvents.current.set(sessionId, next);
+        setActive((current) => {
+          if (!current || current.id !== sessionId || !busyRef.current.has(sessionId)) return current;
+          return withPendingEvents(current, next);
+        });
+      });
       await composerWrite.current;
       const res = await api.sendMessage({
         sessionId,
@@ -278,10 +337,12 @@ export default function App() {
         cwd: active.cwd,
         model: active.model,
         effort: normalizeEffort(active.effort),
-        fastMode: active.fastMode,
+        fastMode: supportsFastMode(active.model) && active.fastMode,
         allowedToolsPreset: active.allowedToolsPreset,
         skill: chosen?.name ?? null,
       });
+      busyRef.current.delete(sessionId);
+      liveEvents.current.delete(sessionId);
       if (focusId.current === sessionId) setActive(res.session);
       setDraft((current) => (current?.sessionId === sessionId ? null : current));
       await refreshSessions();
@@ -292,6 +353,8 @@ export default function App() {
       }
       await notifyReply(sessionId, res.session.title || sessionTitle);
     } catch (e) {
+      busyRef.current.delete(sessionId);
+      liveEvents.current.delete(sessionId);
       setDraft((current) => (current?.sessionId === sessionId ? null : current));
       if (focusId.current === sessionId) {
         setError(String(e));
@@ -310,7 +373,9 @@ export default function App() {
       }
       await notifyReply(sessionId, sessionTitle);
     } finally {
+      unlisten?.();
       busyRef.current.delete(sessionId);
+      liveEvents.current.delete(sessionId);
       setBusyIds(new Set(busyRef.current));
     }
   };
@@ -339,29 +404,41 @@ export default function App() {
 
   const sessionBusy = !!active && busyIds.has(active.id);
 
+  useEffect(() => {
+    if (!active || sessionBusy || !active.fastMode || supportsFastMode(active.model)) return;
+    chooseFastMode(false);
+  }, [active?.id, active?.model, active?.fastMode, sessionBusy]);
+
   const bubbles: Bubble[] = useMemo(() => {
-    const fromSession = (active?.turns ?? [])
-      .filter((turn) => turn.status !== "pending")
-      .map((turn) => {
-        const shown = presentTurn(turn);
-        return {
-          id: turn.id,
-          role: turn.role,
-          text: shown.text,
-          costUsd: shown.costUsd,
-          finishedAt: turn.finishedAt,
-        };
-      });
+    const turns = active?.turns ?? [];
+    const toBubble = (turn: GuiTurn): Bubble => {
+      const shown = presentTurn(turn);
+      return {
+        id: turn.id,
+        role: turn.role,
+        text: shown.text,
+        costUsd: shown.costUsd,
+        finishedAt: turn.finishedAt,
+        events: turn.events ?? [],
+      };
+    };
+    const settled = turns.filter((turn) => turn.status !== "pending").map(toBubble);
     if (draft && draft.sessionId === active?.id) {
-      fromSession.push({
+      settled.push({
         id: "draft-user",
         role: "user",
         text: draft.text,
         costUsd: null,
         finishedAt: null,
+        events: [],
       });
     }
-    return fromSession;
+    for (const turn of turns) {
+      if (turn.status === "pending" && (turn.events?.length ?? 0) > 0) {
+        settled.push(toBubble(turn));
+      }
+    }
+    return settled;
   }, [active, draft]);
 
   const openDiscovered = async (args: { cwd: string; sessionId: string; title: string }) => {
@@ -631,17 +708,19 @@ export default function App() {
                   className="h-8 w-[148px] rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                   onChange={chooseEffort}
                 />
-                <label htmlFor="composer-fast-mode" className="inline-flex items-center gap-2 text-[12px] text-muted-foreground">
-                  <input
-                    id="composer-fast-mode"
-                    type="checkbox"
-                    className="size-3.5 accent-primary disabled:opacity-50"
-                    checked={!!active?.fastMode}
-                    disabled={!active || sessionBusy}
-                    onChange={(e) => chooseFastMode(e.target.checked)}
-                  />
-                  {t("fastMode")}
-                </label>
+                {supportsFastMode(active?.model) && (
+                  <label htmlFor="composer-fast-mode" className="inline-flex items-center gap-2 text-[12px] text-muted-foreground">
+                    <input
+                      id="composer-fast-mode"
+                      type="checkbox"
+                      className="size-3.5 accent-primary disabled:opacity-50"
+                      checked={!!active?.fastMode}
+                      disabled={!active || sessionBusy}
+                      onChange={(e) => chooseFastMode(e.target.checked)}
+                    />
+                    {t("fastMode")}
+                  </label>
+                )}
                 <p className="text-[11px] text-muted-foreground">{t("modelHint")}</p>
                 <p className="text-[11px] text-muted-foreground">{t("effortHint")}</p>
               </div>
