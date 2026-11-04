@@ -27,6 +27,10 @@ export interface GuiSession {
   cwd: string;
   title: string;
   model: string | null;
+  /** Reasoning effort for this chat. Null omits `--effort`. */
+  effort: string | null;
+  /** Fast mode for this chat. False omits `--settings`. */
+  fastMode: boolean;
   allowedToolsPreset: string;
   createdAt: string;
   updatedAt: string;

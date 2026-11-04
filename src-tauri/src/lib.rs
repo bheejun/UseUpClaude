@@ -184,6 +184,38 @@ fn set_session_model(
 }
 
 #[tauri::command]
+fn set_session_effort(
+    state: State<'_, AppState>,
+    id: Uuid,
+    effort: Option<String>,
+) -> Result<GuiSession, String> {
+    if state.runs.contains(id) {
+        return Err("This chat already has a turn in progress.".into());
+    }
+    let mut session = load_session(&state, id)?;
+    session.effort = cli::normalize_effort(effort.as_deref());
+    session.updated_at = Utc::now();
+    state.store.save_session(&session).map_err(err)?;
+    Ok(session)
+}
+
+#[tauri::command]
+fn set_session_fast_mode(
+    state: State<'_, AppState>,
+    id: Uuid,
+    fast_mode: bool,
+) -> Result<GuiSession, String> {
+    if state.runs.contains(id) {
+        return Err("This chat already has a turn in progress.".into());
+    }
+    let mut session = load_session(&state, id)?;
+    session.fast_mode = fast_mode;
+    session.updated_at = Utc::now();
+    state.store.save_session(&session).map_err(err)?;
+    Ok(session)
+}
+
+#[tauri::command]
 fn list_project_skills(cwd: String) -> Vec<skills::ProjectSkill> {
     skills::list_available_skills(std::path::Path::new(&cwd))
 }
@@ -225,6 +257,8 @@ fn create_session(
         cwd,
         title,
         model: normalize_model(model),
+        effort: None,
+        fast_mode: false,
         allowed_tools_preset: allowed_tools_preset
             .unwrap_or(settings.allowed_tools_preset),
         created_at: now,
@@ -280,6 +314,8 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
             cwd: &cwd,
             resume: None,
             model: None,
+            effort: None,
+            fast_mode: false,
             allowed_tools_preset: "read",
             timeout_secs: 120,
             api_key: None,
@@ -364,8 +400,11 @@ async fn send_message(
         Some(_) => return Err("That skill is not available.".into()),
         None => typed,
     };
-    // The composer chooses the model for this chat. Null keeps the CLI default and omits --model.
+    // The composer chooses model, effort, and fast mode for this chat.
+    // Null model omits --model. Null effort omits --effort. Fast mode off omits --settings.
     session.model = normalize_model(request.model.clone());
+    session.effort = cli::normalize_effort(request.effort.as_deref());
+    session.fast_mode = request.fast_mode;
 
     let fresh_gui_chat = session.cli_session_id.is_none()
         && !session
@@ -414,6 +453,8 @@ async fn send_message(
 
     let resume = session.cli_session_id.clone();
     let model = session.model.clone();
+    let effort = session.effort.clone();
+    let fast_mode = session.fast_mode;
     let tools = request
         .allowed_tools_preset
         .unwrap_or_else(|| session.allowed_tools_preset.clone());
@@ -425,6 +466,8 @@ async fn send_message(
             cwd: &cwd,
             resume: resume.as_deref(),
             model: model.as_deref(),
+            effort: effort.as_deref(),
+            fast_mode,
             allowed_tools_preset: &tools,
             timeout_secs: settings.timeout_secs,
             api_key: None,
@@ -575,6 +618,8 @@ fn create_session_inner(
         cwd,
         title: "New chat".into(),
         model: normalize_model(model),
+        effort: None,
+        fast_mode: false,
         allowed_tools_preset: allowed_tools_preset
             .unwrap_or(settings.allowed_tools_preset),
         created_at: now,
@@ -742,6 +787,8 @@ pub fn run() {
             list_sessions,
             get_session,
             set_session_model,
+            set_session_effort,
+            set_session_fast_mode,
             list_project_skills,
             delete_session,
             create_session,
@@ -781,6 +828,8 @@ mod tests {
             cwd: "C:/tmp".into(),
             title: "t".into(),
             model: None,
+            effort: None,
+            fast_mode: false,
             allowed_tools_preset: "read".into(),
             created_at: now,
             updated_at: now,
@@ -817,6 +866,25 @@ mod tests {
         assert!(delta < 1.0);
         assert!((incremental_turn_cost(Some(0.42), 0.0).unwrap() - 0.42).abs() < 1e-12);
         assert!((incremental_turn_cost(Some(0.5), 21.0).unwrap() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn older_session_without_effort_or_fast_mode_still_loads() {
+        let raw = r#"{
+            "id":"11111111-1111-1111-1111-111111111111",
+            "cliSessionId":null,
+            "cwd":"C:/tmp",
+            "title":"t",
+            "model":"claude-opus",
+            "allowedToolsPreset":"read",
+            "createdAt":"2026-01-01T00:00:00Z",
+            "updatedAt":"2026-01-01T00:00:00Z",
+            "turns":[]
+        }"#;
+        let session: GuiSession = serde_json::from_str(raw).unwrap();
+        assert!(session.effort.is_none());
+        assert!(!session.fast_mode);
+        assert_eq!(session.model.as_deref(), Some("claude-opus"));
     }
 
     #[test]
