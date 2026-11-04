@@ -4,7 +4,7 @@ import { MarkdownMessage } from "@/components/markdown-message";
 import { formatUsd } from "@/chat-format";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
-import type { TurnRole } from "@/types";
+import type { TurnEvent, TurnRole } from "@/types";
 
 export type Bubble = {
   id: string;
@@ -12,7 +12,70 @@ export type Bubble = {
   text: string;
   costUsd: number | null;
   finishedAt?: string | null;
+  events?: TurnEvent[];
 };
+
+type ToolRow = {
+  key: string;
+  name: string;
+  preview: string | null;
+  isError: boolean;
+};
+
+function toolRows(events: TurnEvent[]): ToolRow[] {
+  const rows: ToolRow[] = [];
+  const byId = new Map<string, number>();
+  events.forEach((event, index) => {
+    if (event.kind === "tool_use") {
+      if (event.toolUseId) byId.set(event.toolUseId, rows.length);
+      rows.push({
+        key: `${event.toolUseId || "use"}-${index}`,
+        name: event.name,
+        preview: null,
+        isError: false,
+      });
+      return;
+    }
+    const slot = event.toolUseId ? byId.get(event.toolUseId) : undefined;
+    if (slot != null && rows[slot].preview == null) {
+      rows[slot] = { ...rows[slot], preview: event.preview, isError: event.isError };
+      return;
+    }
+    rows.push({
+      key: `${event.toolUseId || "result"}-${index}`,
+      name: event.name,
+      preview: event.preview,
+      isError: event.isError,
+    });
+  });
+  return rows;
+}
+
+function ToolEvents({ events }: { events: TurnEvent[] }) {
+  const { t } = useI18n();
+  const rows = toolRows(events);
+  if (rows.length === 0) return null;
+  return (
+    <div className="mb-2 flex flex-col gap-1.5" role="group" aria-label={t("toolEvent")}>
+      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{t("toolEvent")}</p>
+      {rows.map((row) => (
+        <div key={row.key} className="rounded-md border border-border bg-card px-3 py-2 text-left">
+          <p className="font-mono text-[12px] text-foreground">{row.name}</p>
+          {row.preview ? (
+            <pre
+              className={cn(
+                "m-0 mt-1 whitespace-pre-wrap break-all font-mono text-[12px]",
+                row.isError ? "text-red-100" : "text-muted-foreground",
+              )}
+            >
+              {row.preview}
+            </pre>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function relativeLabel(
   iso: string | null | undefined,
@@ -34,6 +97,8 @@ function ChatBubble({ bubble, now }: { bubble: Bubble; now: number }) {
   const { t } = useI18n();
   const bodyRef = useRef<HTMLDivElement>(null);
   const mine = bubble.role === "user";
+  const events = bubble.events ?? [];
+  const showBody = mine || bubble.role === "system" || bubble.text.trim().length > 0;
   const label =
     bubble.role === "user" ? t("you") : bubble.role === "error" ? t("roleError") : t("assistantName");
 
@@ -52,18 +117,21 @@ function ChatBubble({ bubble, now }: { bubble: Bubble; now: number }) {
         <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
           {label}
         </div>
-        <div
-          ref={bodyRef}
-          className={cn(
-            "rounded-md border px-3 py-2 text-left text-[14px] leading-relaxed",
-            mine && "whitespace-pre-wrap border-border bg-secondary",
-            bubble.role === "assistant" && "border-border bg-card",
-            bubble.role === "error" && "border-destructive/40 bg-destructive/10 text-red-100",
-            bubble.role === "system" && "border-border bg-card text-muted-foreground",
-          )}
-        >
-          {mine || bubble.role === "system" ? bubble.text : <MarkdownMessage text={bubble.text} />}
-        </div>
+        {events.length > 0 && <ToolEvents events={events} />}
+        {showBody && (
+          <div
+            ref={bodyRef}
+            className={cn(
+              "rounded-md border px-3 py-2 text-left text-[14px] leading-relaxed",
+              mine && "whitespace-pre-wrap border-border bg-secondary",
+              bubble.role === "assistant" && "border-border bg-card",
+              bubble.role === "error" && "border-destructive/40 bg-destructive/10 text-red-100",
+              bubble.role === "system" && "border-border bg-card text-muted-foreground",
+            )}
+          >
+            {mine || bubble.role === "system" ? bubble.text : <MarkdownMessage text={bubble.text} />}
+          </div>
+        )}
         {bubble.role === "assistant" && bubble.text.trim() && (
           <AssistantActions
             now={now}

@@ -7,13 +7,14 @@ mod skills;
 mod store;
 
 use chrono::Utc;
+use serde::Serialize;
 use cli::{ActiveRun, RunSpec};
 use models::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use store::AppStore;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 struct AppState {
@@ -321,6 +322,7 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
             api_key: None,
         },
         Arc::new(ActiveRun::new()),
+        &|_| {},
     )
     .await
     .map_err(err)?;
@@ -349,8 +351,26 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
     })
 }
 
+const TURN_EVENT: &str = "turn-event";
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct TurnEventPayload {
+    session_id: Uuid,
+    #[serde(flatten)]
+    event: TurnEvent,
+}
+
+fn turn_event_payload(session_id: Uuid, event: &TurnEvent) -> TurnEventPayload {
+    TurnEventPayload {
+        session_id,
+        event: event.clone(),
+    }
+}
+
 #[tauri::command]
 async fn send_message(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: SendMessageRequest,
 ) -> Result<SendMessageResponse, String> {
@@ -450,7 +470,7 @@ async fn send_message(
 
     if !cwd.is_dir() {
         let msg = format!("cwd does not exist: {}", session.cwd);
-        return fail_pending(&state, session, pending_id, msg, None);
+        return fail_pending(&state, session, pending_id, msg, None, Vec::new());
     }
 
     let resume = session.cli_session_id.clone();
@@ -460,6 +480,17 @@ async fn send_message(
     let tools = request
         .allowed_tools_preset
         .unwrap_or_else(|| session.allowed_tools_preset.clone());
+    let session_id = session.id;
+    let seen: Arc<Mutex<Vec<TurnEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_emit = Arc::clone(&seen);
+    let on_event = move |event: &TurnEvent| {
+        let mut stored = event.clone();
+        stored.preview = redact_secrets(&stored.preview);
+        if let Ok(mut guard) = seen_emit.lock() {
+            guard.push(stored.clone());
+        }
+        let _ = app.emit(TURN_EVENT, turn_event_payload(session_id, &stored));
+    };
 
     let run = cli::run_claude_managed(
         RunSpec {
@@ -475,6 +506,7 @@ async fn send_message(
             api_key: None,
         },
         active_run,
+        &on_event,
     )
     .await;
 
@@ -539,11 +571,27 @@ async fn send_message(
                 assistant_turn,
             })
         }
-        Err(cli::CliError::Cancelled) => {
-            fail_pending(&state, session, pending_id, "Cancelled".into(), None)
-        }
-        Err(e) => fail_pending(&state, session, pending_id, e.to_string(), None),
+        Err(cli::CliError::Cancelled) => fail_pending(
+            &state,
+            session,
+            pending_id,
+            "Cancelled".into(),
+            None,
+            seen_events(&seen),
+        ),
+        Err(e) => fail_pending(
+            &state,
+            session,
+            pending_id,
+            e.to_string(),
+            None,
+            seen_events(&seen),
+        ),
     }
+}
+
+fn seen_events(seen: &Mutex<Vec<TurnEvent>>) -> Vec<TurnEvent> {
+    seen.lock().map(|guard| guard.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -647,6 +695,7 @@ fn fail_pending(
     pending_id: Uuid,
     message: String,
     exit_code: Option<i32>,
+    events: Vec<TurnEvent>,
 ) -> Result<SendMessageResponse, String> {
     let turn = session
         .turns
@@ -657,6 +706,7 @@ fn fail_pending(
     turn.status = TurnStatus::Failed;
     turn.content = message;
     turn.exit_code = exit_code;
+    turn.events = events;
     turn.finished_at = Some(Utc::now());
     let assistant_turn = turn.clone();
     session.updated_at = Utc::now();
@@ -876,6 +926,29 @@ mod tests {
         assert_eq!(turn.content, "hi");
         let saved = serde_json::to_value(&turn).unwrap();
         assert!(saved["events"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn turn_event_payload_matches_stored_event() {
+        let session_id = Uuid::new_v4();
+        let event = TurnEvent {
+            kind: TurnEventKind::ToolResult,
+            tool_use_id: "toolu_1".into(),
+            name: "Read".into(),
+            is_error: true,
+            preview: "missing file".into(),
+        };
+        let payload = turn_event_payload(session_id, &event);
+        assert_eq!(payload.event, event);
+        let stored = serde_json::to_value(&event).unwrap();
+        let emitted = serde_json::to_value(&payload).unwrap();
+        for key in ["kind", "toolUseId", "name", "isError", "preview"] {
+            assert_eq!(emitted.get(key), stored.get(key), "{key}");
+        }
+        assert_eq!(
+            emitted.get("sessionId").and_then(|value| value.as_str()),
+            Some(session_id.to_string()).as_deref()
+        );
     }
 
     #[test]
