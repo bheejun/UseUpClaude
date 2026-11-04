@@ -139,9 +139,35 @@ fn read_shim_text(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Inline `--settings` value. This is one argv element for this process only.
+/// It is not a file path, and nothing here writes the user's Claude settings file.
+pub(crate) const FAST_MODE_SETTINGS: &str = r#"{"fastMode": true}"#;
+
+/// Keep a known effort level, or drop the flag. Case and surrounding space do not matter.
+pub(crate) fn normalize_effort(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    EFFORT_LEVELS
+        .iter()
+        .copied()
+        .find(|level| *level == lower)
+        .map(str::to_string)
+}
+
 /// Flags for one non-interactive turn. The prompt is not included; it is written
 /// to stdin so a long or quoted prompt never becomes a batch-file argument.
-fn print_mode_args(resume: Option<&str>, model: Option<&str>, tools: &str) -> Vec<String> {
+fn print_mode_args(
+    resume: Option<&str>,
+    model: Option<&str>,
+    tools: &str,
+    effort: Option<&str>,
+    fast_mode: bool,
+) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -158,6 +184,14 @@ fn print_mode_args(resume: Option<&str>, model: Option<&str>, tools: &str) -> Ve
             args.push("--model".to_string());
             args.push(model.to_string());
         }
+    }
+    if let Some(level) = normalize_effort(effort) {
+        args.push("--effort".to_string());
+        args.push(level);
+    }
+    if fast_mode {
+        args.push("--settings".to_string());
+        args.push(FAST_MODE_SETTINGS.to_string());
     }
     args
 }
@@ -257,6 +291,8 @@ pub struct RunSpec<'a> {
     pub cwd: &'a Path,
     pub resume: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub fast_mode: bool,
     pub allowed_tools_preset: &'a str,
     pub timeout_secs: u64,
     pub api_key: Option<&'a str>,
@@ -290,6 +326,8 @@ pub async fn run_claude_managed(
         spec.resume,
         spec.model,
         spec.allowed_tools_preset,
+        spec.effort,
+        spec.fast_mode,
     ))
     .current_dir(spec.cwd)
     .stdin(Stdio::piped())
@@ -1012,11 +1050,7 @@ mod tests {
         let elsewhere = root.join("other");
         fs::create_dir_all(&elsewhere).unwrap();
         let quoted = elsewhere.join("claude.cmd");
-        fs::write(
-            &quoted,
-            format!("\"{}\" %*\n", exe.display().to_string().replace('/', "\\")),
-        )
-        .unwrap();
+        fs::write(&quoted, format!("\"{}\" %*\n", exe.display())).unwrap();
         assert_eq!(prefer_direct_executable(&quoted), exe);
         let _ = fs::remove_dir_all(&root);
     }
@@ -1024,10 +1058,21 @@ mod tests {
     #[test]
     fn prompt_stays_off_argv_and_flags_stay() {
         let prompt = "say \"hello\" & echo off ".repeat(400);
-        let args = print_mode_args(Some("sess-1"), Some("claude-opus"), "read");
+        let args = print_mode_args(
+            Some("sess-1"),
+            Some("claude-opus"),
+            "read",
+            Some("HIGH"),
+            true,
+        );
         assert!(pair(&args, "--permission-mode", "dontAsk"));
         assert!(pair(&args, "--resume", "sess-1"));
         assert!(pair(&args, "--model", "claude-opus"));
+        assert!(pair(&args, "--effort", "high"));
+        assert!(pair(&args, "--settings", FAST_MODE_SETTINGS));
+        let settings = &args[args.iter().position(|arg| arg == "--settings").unwrap() + 1];
+        assert_eq!(settings, r#"{"fastMode": true}"#);
+        assert!(!settings.contains('/') && !settings.contains('\\'));
         assert!(args.iter().any(|arg| arg == "-p"));
         assert!(pair(&args, "--output-format", "stream-json"));
         assert!(args.iter().any(|arg| arg == "--verbose"));
@@ -1037,8 +1082,10 @@ mod tests {
             .any(|arg| arg == &prompt || arg.contains("hello") || arg.contains('&')));
         assert!(args.iter().map(|arg| arg.len()).sum::<usize>() < 8_191);
         assert!(prompt.len() > 8_191);
-        let no_model = print_mode_args(None, Some(""), "full");
+        let no_model = print_mode_args(None, Some(""), "full", Some("nope"), false);
         assert!(!no_model.iter().any(|arg| arg == "--model"));
+        assert!(!no_model.iter().any(|arg| arg == "--effort"));
+        assert!(!no_model.iter().any(|arg| arg == "--settings"));
         assert!(no_model.iter().any(|arg| arg == "--dangerously-skip-permissions"));
         assert!(!no_model.iter().any(|arg| arg == "--resume"));
         assert!(pair(&no_model, "--output-format", "stream-json"));
@@ -1046,6 +1093,16 @@ mod tests {
         assert!(!no_model
             .iter()
             .any(|arg| arg == "--include-partial-messages"));
+        let defaults = print_mode_args(None, None, "read", None, false);
+        assert!(!defaults.iter().any(|arg| arg == "--effort" || arg == "--settings"));
+        for level in ["low", "medium", "high", "xhigh", "max"] {
+            let level_args = print_mode_args(None, None, "read", Some(level), false);
+            assert!(pair(&level_args, "--effort", level), "{level}");
+            assert!(!level_args.iter().any(|arg| arg == "--settings"));
+            assert!(!level_args.iter().any(|arg| arg.contains("hello") || arg.contains('&')));
+        }
+        assert!(normalize_effort(Some("  xhigh ")).as_deref() == Some("xhigh"));
+        assert!(normalize_effort(None).is_none());
     }
 
     #[test]

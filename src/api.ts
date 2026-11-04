@@ -25,6 +25,10 @@ export const api = {
   listProjectSkills: (cwd: string) => invoke<ProjectSkill[]>("list_project_skills", { cwd }),
   setSessionModel: (id: string, model: string | null) =>
     invoke<GuiSession>("set_session_model", { id, model }),
+  setSessionEffort: (id: string, effort: string | null) =>
+    invoke<GuiSession>("set_session_effort", { id, effort }),
+  setSessionFastMode: (id: string, fastMode: boolean) =>
+    invoke<GuiSession>("set_session_fast_mode", { id, fastMode }),
   detectClaude: () => invoke<ClaudeDetectResult>("detect_claude"),
   listSessions: () => invoke<SessionSummary[]>("list_sessions"),
   getSession: (id: string) => invoke<GuiSession>("get_session", { id }),
@@ -43,6 +47,8 @@ export const api = {
     prompt: string;
     cwd?: string | null;
     model?: string | null;
+    effort?: string | null;
+    fastMode?: boolean;
     allowedToolsPreset?: string | null;
     skill?: string | null;
   }) => invoke<SendMessageResponse>("send_message", { request }),
