@@ -85,28 +85,6 @@ export function sumSessionCost(
   return any ? sum : null;
 }
 
-/** Readable transcript. CLI JSON envelopes become the result text. */
-export function conversationText(
-  session: {
-    title: string;
-    cwd: string;
-    turns: { role: string; content: string; costUsd?: number | null }[];
-  },
-  labels: { user: string; assistant: string; error: string },
-): string {
-  const parts: string[] = [session.title.trim() || "Chat"];
-  const cwd = session.cwd.trim();
-  if (cwd) parts.push(cwd);
-  for (const turn of session.turns) {
-    const text = presentTurn(turn).text.trim();
-    if (!text) continue;
-    const label =
-      turn.role === "user" ? labels.user : turn.role === "error" ? labels.error : labels.assistant;
-    parts.push("", label, text);
-  }
-  return `${parts.join("\n")}\n`;
-}
-
 export function folderBase(cwd: string): string {
   const parts = cwd.split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] || cwd || "—";

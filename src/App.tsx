@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
-import { conversationText, folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
+import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
@@ -74,7 +74,6 @@ export default function App() {
   const [spend, setSpend] = useState<WorkspaceSpend | null>(null);
   const [costReport, setCostReport] = useState<SessionCostReport | null>(null);
   const [showCosts, setShowCosts] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [detect, setDetect] = useState<ClaudeDetectResult | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [active, setActive] = useState<GuiSession | null>(null);
@@ -210,6 +209,7 @@ export default function App() {
         role: turn.role,
         text: shown.text,
         costUsd: shown.costUsd,
+        finishedAt: turn.finishedAt,
       };
     });
     if (draftUser) {
@@ -218,6 +218,7 @@ export default function App() {
         role: "user",
         text: draftUser,
         costUsd: null,
+        finishedAt: null,
       });
     }
     return fromSession;
@@ -376,30 +377,6 @@ export default function App() {
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
-                {active && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={active.turns.length === 0}
-                    onClick={() => {
-                      void navigator.clipboard
-                        .writeText(
-                          conversationText(active, {
-                            user: t("you"),
-                            assistant: t("assistantName"),
-                            error: t("roleError"),
-                          }),
-                        )
-                        .then(() => {
-                          setCopied(true);
-                          window.setTimeout(() => setCopied(false), 1600);
-                        })
-                        .catch(() => setError(t("copyFailed")));
-                    }}
-                  >
-                    {copied ? t("copiedChat") : t("copyChat")}
-                  </Button>
-                )}
                 <Badge className={keyStatus.configured && detect?.found ? "text-primary" : "text-amber-200"}>
                   {keyStatus.configured ? t("keyOk") : t("noKey")}
                   {" · "}
