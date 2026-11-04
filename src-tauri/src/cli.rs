@@ -1,12 +1,13 @@
 use crate::models::{ClaudeDetectResult, ClaudeJsonOutput, CliEnvelope};
 use serde_json::Value;
 use crate::secrets;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -40,16 +41,124 @@ impl ActiveRun {
 }
 
 pub fn resolve_binary(override_path: Option<&str>) -> Result<PathBuf, CliError> {
-    if let Some(p) = override_path {
+    let found = if let Some(p) = override_path {
         let path = PathBuf::from(p);
-        if path.is_file() {
-            return Ok(path);
+        if !path.is_file() {
+            return Err(CliError::Message(format!(
+                "configured claude path not found: {p}"
+            )));
         }
-        return Err(CliError::Message(format!(
-            "configured claude path not found: {p}"
-        )));
+        path
+    } else {
+        which::which("claude").map_err(|_| CliError::NotFound)?
+    };
+    // `claude` on npm is a `.cmd` shim. Rust refuses to spawn a batch file once
+    // the command line passes cmd's ~8191 character limit, and quotes in the
+    // prompt are parsed by cmd.exe. The shim's claude.exe takes the same args.
+    Ok(prefer_direct_executable(&found))
+}
+
+fn is_windows_exe(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        && path.is_file()
+}
+
+/// Use `claude.exe` when `path` is the npm `.cmd` / extensionless shim.
+pub(crate) fn prefer_direct_executable(path: &Path) -> PathBuf {
+    if is_windows_exe(path) {
+        return path.to_path_buf();
     }
-    which::which("claude").map_err(|_| CliError::NotFound)
+    exe_next_to_npm_shim(path)
+        .or_else(|| exe_referenced_by_shim(path))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn exe_next_to_npm_shim(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?;
+    let nested = dir
+        .join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-code")
+        .join("bin")
+        .join("claude.exe");
+    if nested.is_file() {
+        return Some(nested);
+    }
+    let sibling = dir.join("claude.exe");
+    sibling.is_file().then_some(sibling)
+}
+
+fn exe_referenced_by_shim(path: &Path) -> Option<PathBuf> {
+    let text = read_shim_text(path)?;
+    let dir = path.parent()?;
+    let mut prefix = dir.to_string_lossy().into_owned();
+    if !prefix.ends_with('\\') && !prefix.ends_with('/') {
+        prefix.push('\\');
+    }
+    let lower = text.to_ascii_lowercase();
+    let marker = "claude.exe";
+    let mut search = 0;
+    while let Some(rel) = lower[search..].find(marker) {
+        let end = search + rel + marker.len();
+        let start = text[..end]
+            .rfind('"')
+            .map(|index| index + 1)
+            .or_else(|| {
+                text[..end]
+                    .rfind(|ch: char| ch.is_whitespace())
+                    .map(|index| index + 1)
+            })
+            .unwrap_or(0);
+        let raw = text[start..end].trim().trim_matches('"').trim_matches('\'');
+        let expanded = raw.replace("%~dp0", &prefix).replace("%dp0%", &prefix);
+        let candidate = PathBuf::from(expanded);
+        if candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("claude.exe"))
+            && candidate.is_file()
+        {
+            return Some(candidate);
+        }
+        search = end;
+    }
+    None
+}
+
+fn read_shim_text(path: &Path) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    if meta.len() > 64 * 1024 {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Flags for one non-interactive turn. The prompt is not included; it is written
+/// to stdin so a long or quoted prompt never becomes a batch-file argument.
+fn print_mode_args(resume: Option<&str>, model: Option<&str>, tools: &str) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+    ];
+    args.extend(permission_args(tools));
+    if let Some(id) = resume {
+        args.push("--resume".to_string());
+        args.push(id.to_string());
+    }
+    if let Some(model) = model {
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+    args
 }
 
 pub async fn detect_claude(override_path: Option<&str>) -> ClaudeDetectResult {
@@ -167,28 +276,18 @@ pub async fn run_claude_managed(
 ) -> Result<RunOutput, CliError> {
     active.cancel_flag.store(false, Ordering::SeqCst);
 
-    let mut cmd = Command::new(spec.binary);
-    cmd.arg("-p")
-        .arg(spec.prompt)
-        .arg("--output-format")
-        .arg("json")
-        .current_dir(spec.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    for arg in permission_args(spec.allowed_tools_preset) {
-        cmd.arg(arg);
-    }
-    if let Some(id) = spec.resume {
-        cmd.arg("--resume").arg(id);
-    }
-    if let Some(model) = spec.model {
-        if !model.is_empty() {
-            cmd.arg("--model").arg(model);
-        }
-    }
+    let binary = prefer_direct_executable(spec.binary);
+    let mut cmd = Command::new(&binary);
+    cmd.args(print_mode_args(
+        spec.resume,
+        spec.model,
+        spec.allowed_tools_preset,
+    ))
+    .current_dir(spec.cwd)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
 
     // Chat key only. An Admin key is refused before it can reach the child env.
     let chat_key = match spec.api_key {
@@ -212,6 +311,7 @@ pub async fn run_claude_managed(
         .stderr
         .take()
         .ok_or_else(|| CliError::Message("failed to capture stderr".into()))?;
+    let stdin = child.stdin.take();
 
     *active.child.lock().await = Some(child);
 
@@ -224,6 +324,19 @@ pub async fn run_claude_managed(
         let mut buf = Vec::new();
         stderr.read_to_end(&mut buf).await.map_err(CliError::from)?;
         Ok::<_, CliError>(String::from_utf8_lossy(&buf).to_string())
+    };
+
+    let in_task = async {
+        if let Some(mut stdin) = stdin {
+            match stdin.write_all(spec.prompt.as_bytes()).await {
+                Ok(()) => {
+                    let _ = stdin.shutdown().await;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(CliError::Io(e)),
+            }
+        }
+        Ok(())
     };
 
     let wait_task = async {
@@ -255,7 +368,7 @@ pub async fn run_claude_managed(
 
     let joined = timeout(
         Duration::from_secs(spec.timeout_secs.max(30)),
-        async { tokio::try_join!(out_task, err_task, wait_task) },
+        async { tokio::try_join!(out_task, err_task, wait_task, in_task) },
     )
     .await;
 
@@ -267,7 +380,7 @@ pub async fn run_claude_managed(
             Err(CliError::TimedOut(spec.timeout_secs))
         }
         Ok(Err(e)) => Err(e),
-        Ok(Ok((stdout, stderr, exit_code))) => {
+        Ok(Ok((stdout, stderr, exit_code, ()))) => {
             *active.child.lock().await = None;
             Ok(parse_output(exit_code, stdout, stderr))
         }
@@ -659,5 +772,55 @@ mod tests {
         let env = envelope_if_whole_document(&sample_envelope()).expect("envelope");
         assert_eq!(env.result_text, "Hello\nworld");
         assert_eq!(env.session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn npm_cmd_shim_resolves_to_claude_exe() {
+        let root = std::env::temp_dir().join(format!("useupclaude-shim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let exe_dir = root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&exe_dir).unwrap();
+        let exe = exe_dir.join("claude.exe");
+        fs::write(&exe, b"").unwrap();
+        let cmd = root.join("claude.cmd");
+        fs::write(
+            &cmd,
+            "\"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\" %*\n",
+        )
+        .unwrap();
+        assert_eq!(prefer_direct_executable(&cmd), exe);
+        assert_eq!(prefer_direct_executable(&exe), exe);
+        let elsewhere = root.join("other");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let quoted = elsewhere.join("claude.cmd");
+        fs::write(
+            &quoted,
+            format!("\"{}\" %*\n", exe.display().to_string().replace('/', "\\")),
+        )
+        .unwrap();
+        assert_eq!(prefer_direct_executable(&quoted), exe);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prompt_stays_off_argv_and_flags_stay() {
+        let prompt = "say \"hello\" & echo off ".repeat(400);
+        let args = print_mode_args(Some("sess-1"), Some("claude-opus"), "read");
+        assert!(pair(&args, "--permission-mode", "dontAsk"));
+        assert!(pair(&args, "--resume", "sess-1"));
+        assert!(pair(&args, "--model", "claude-opus"));
+        assert!(args.iter().any(|arg| arg == "-p"));
+        assert!(args.iter().any(|arg| arg == "--output-format"));
+        assert!(!args.iter().any(|arg| arg.contains("hello") || arg.contains('&')));
+        assert!(args.iter().map(|arg| arg.len()).sum::<usize>() < 8_191);
+        assert!(prompt.len() > 8_191);
+        let no_model = print_mode_args(None, Some(""), "full");
+        assert!(!no_model.iter().any(|arg| arg == "--model"));
+        assert!(no_model.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(!no_model.iter().any(|arg| arg == "--resume"));
     }
 }
