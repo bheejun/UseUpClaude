@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
@@ -61,8 +63,10 @@ export default function App() {
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [skillIndex, setSkillIndex] = useState(0);
   const modelWrite = useRef(Promise.resolve());
-  const [draftUser, setDraftUser] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const focusId = useRef<string | null>(null);
+  const busyRef = useRef(new Set<string>());
+  const [draft, setDraft] = useState<{ sessionId: string; text: string } | null>(null);
+  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const [showNewChat, setShowNewChat] = useState(false);
   const [showDiscover, setShowDiscover] = useState(false);
@@ -139,9 +143,38 @@ export default function App() {
   }, [active?.cwd]);
 
   const selectSession = async (id: string) => {
+    focusId.current = id;
+    setDraft(null);
     setError(null);
     setView("chat");
-    setActive(await api.getSession(id));
+    try {
+      const session = await api.getSession(id);
+      if (focusId.current !== id) return;
+      setActive(session);
+    } catch (e) {
+      if (focusId.current === id) setError(String(e));
+    }
+  };
+
+  const notifyReply = async (sessionId: string, title: string) => {
+    if (focusId.current === sessionId) {
+      try {
+        if (await getCurrentWindow().isFocused()) return;
+      } catch {
+        return;
+      }
+    }
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (!granted) return;
+      await sendNotification({
+        title: "UseUpClaude",
+        body: t("replyReady", { title: title || "Chat" }),
+      });
+    } catch {
+      // A missing notification permission should not block the reply.
+    }
   };
 
   const readyHint = !keyStatus.configured
@@ -185,46 +218,62 @@ export default function App() {
   const handleSend = async () => {
     const text = prompt.trim();
     const chosen = skill;
-    if ((!text && !chosen) || busy || readyHint) return;
     if (!active) {
       setShowNewChat(true);
       return;
     }
-    setBusy(true);
+    const sessionId = active.id;
+    const sessionTitle = active.title;
+    if ((!text && !chosen) || busyRef.current.has(sessionId) || readyHint) return;
+    busyRef.current.add(sessionId);
+    setBusyIds(new Set(busyRef.current));
     setError(null);
     setPrompt("");
     setSkill(null);
-    setDraftUser(chosen ? (text ? `/${chosen.name}\n${text}` : `/${chosen.name}`) : text);
+    setDraft({
+      sessionId,
+      text: chosen ? (text ? `/${chosen.name}\n${text}` : `/${chosen.name}`) : text,
+    });
     try {
       await modelWrite.current;
       const res = await api.sendMessage({
-        sessionId: active.id,
+        sessionId,
         prompt: text,
         cwd: active.cwd,
         model: active.model,
         allowedToolsPreset: active.allowedToolsPreset,
         skill: chosen?.name ?? null,
       });
-      setActive(res.session);
-      setDraftUser(null);
+      if (focusId.current === sessionId) setActive(res.session);
+      setDraft((current) => (current?.sessionId === sessionId ? null : current));
       await refreshSessions();
       try {
         await refreshMoney();
       } catch {
-        // The reply is already on screen. Cost totals can refresh later.
+        // The reply is already stored. Cost totals can refresh later.
       }
+      await notifyReply(sessionId, res.session.title || sessionTitle);
     } catch (e) {
-      setError(String(e));
-      setPrompt(text);
-      setSkill(chosen);
-      setDraftUser(null);
-      try {
-        setActive(await api.getSession(active.id));
-      } catch {
-        // Keep the session already on screen.
+      setDraft((current) => (current?.sessionId === sessionId ? null : current));
+      if (focusId.current === sessionId) {
+        setError(String(e));
+        setPrompt(text);
+        setSkill(chosen);
+        try {
+          setActive(await api.getSession(sessionId));
+        } catch {
+          // Keep the session already on screen.
+        }
       }
+      try {
+        await refreshSessions();
+      } catch {
+        // The sidebar can refresh on the next successful load.
+      }
+      await notifyReply(sessionId, sessionTitle);
     } finally {
-      setBusy(false);
+      busyRef.current.delete(sessionId);
+      setBusyIds(new Set(busyRef.current));
     }
   };
 
@@ -250,28 +299,32 @@ export default function App() {
     return [...map.entries()];
   }, [visible]);
 
+  const sessionBusy = !!active && busyIds.has(active.id);
+
   const bubbles: Bubble[] = useMemo(() => {
-    const fromSession = (active?.turns ?? []).map((turn) => {
-      const shown = presentTurn(turn);
-      return {
-        id: turn.id,
-        role: turn.role,
-        text: shown.text,
-        costUsd: shown.costUsd,
-        finishedAt: turn.finishedAt,
-      };
-    });
-    if (draftUser) {
+    const fromSession = (active?.turns ?? [])
+      .filter((turn) => turn.status !== "pending")
+      .map((turn) => {
+        const shown = presentTurn(turn);
+        return {
+          id: turn.id,
+          role: turn.role,
+          text: shown.text,
+          costUsd: shown.costUsd,
+          finishedAt: turn.finishedAt,
+        };
+      });
+    if (draft && draft.sessionId === active?.id) {
       fromSession.push({
         id: "draft-user",
         role: "user",
-        text: draftUser,
+        text: draft.text,
         costUsd: null,
         finishedAt: null,
       });
     }
     return fromSession;
-  }, [active, draftUser]);
+  }, [active, draft]);
 
   const openDiscovered = async (args: { cwd: string; sessionId: string; title: string }) => {
     const existing = sessions.find((s) => s.cliSessionId === args.sessionId);
@@ -287,6 +340,7 @@ export default function App() {
       model: null,
       allowedToolsPreset: settings.allowedToolsPreset,
     });
+    focusId.current = session.id;
     setActive(session);
     setShowDiscover(false);
     setView("chat");
@@ -364,9 +418,14 @@ export default function App() {
                     )}
                     onClick={() => void selectSession(session.id)}
                   >
-                    <span className="block truncate text-[13px]">{session.title}</span>
+                    <span className="flex items-center gap-1.5">
+                      {busyIds.has(session.id) && (
+                        <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden />
+                      )}
+                      <span className="block truncate text-[13px]">{session.title}</span>
+                    </span>
                     <span className="block truncate font-mono text-[10px] text-muted-foreground">
-                      {session.cwd}
+                      {busyIds.has(session.id) ? t("busyChat") : session.cwd}
                     </span>
                   </button>
                 ))}
@@ -458,12 +517,12 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  {bubbles.length === 0 && !busy && (
+                  {bubbles.length === 0 && !sessionBusy && (
                     <p className="mx-auto max-w-xl px-6 pt-8 text-[13px] leading-relaxed text-muted-foreground">
                       {active.cliSessionId ? t("resumedEmpty") : t("emptyThread")}
                     </p>
                   )}
-                  <ChatThread bubbles={bubbles} thinking={busy} />
+                  <ChatThread bubbles={bubbles} thinking={sessionBusy} />
                 </>
               )}
             </div>
@@ -520,7 +579,7 @@ export default function App() {
                   id="composer-model"
                   value={active?.model ?? null}
                   models={catalog.models}
-                  disabled={!active || busy}
+                  disabled={!active || sessionBusy}
                   className="h-8 w-[220px] rounded-md border border-input bg-[#0c0e11] px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                   onChange={chooseModel}
                 />
@@ -571,7 +630,7 @@ export default function App() {
                   <Textarea
                     value={prompt}
                     placeholder={active ? t("placeholderActive") : t("placeholderIdle")}
-                    disabled={busy || !!readyHint}
+                    disabled={sessionBusy || !!readyHint}
                     onChange={(e) => {
                       setPrompt(e.target.value);
                       setSlashDismissed(false);
@@ -608,8 +667,14 @@ export default function App() {
                   />
                 </div>
                 <div className="flex flex-col gap-2">
-                  {busy ? (
-                    <Button type="button" variant="destructive" onClick={() => void api.cancelActive()}>
+                  {sessionBusy ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={() => {
+                        if (active) void api.cancelSession(active.id);
+                      }}
+                    >
                       {t("cancel")}
                     </Button>
                   ) : (
@@ -644,6 +709,7 @@ export default function App() {
             await api.saveSettings(next);
             setSettings(next);
           }
+          focusId.current = session.id;
           setActive(session);
           setShowNewChat(false);
           setView("chat");

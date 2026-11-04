@@ -53,7 +53,7 @@ pub struct GuiTurn {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub status: TurnStatus,
-    /// This turn's CLI `total_cost_usd`, when Claude reported one.
+    /// Cost of this turn only. Not the CLI session's running total.
     #[serde(default)]
     pub cost_usd: Option<f64>,
 }
@@ -70,6 +70,10 @@ pub struct GuiSession {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub turns: Vec<GuiTurn>,
+    /// Older files stored the CLI running total on every turn. After one rewrite,
+    /// each `cost_usd` is that turn only.
+    #[serde(default)]
+    pub turn_costs_are_incremental: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

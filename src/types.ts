@@ -17,7 +17,7 @@ export interface GuiTurn {
   startedAt: string;
   finishedAt: string | null;
   status: TurnStatus;
-  /** This turn's CLI total_cost_usd, when reported. */
+  /** This turn's own cost in USD. Not the CLI session running total. */
   costUsd?: number | null;
 }
 

@@ -46,6 +46,6 @@ export const api = {
     allowedToolsPreset?: string | null;
     skill?: string | null;
   }) => invoke<SendMessageResponse>("send_message", { request }),
-  cancelActive: () => invoke<void>("cancel_active"),
+  cancelSession: (id: string) => invoke<void>("cancel_session", { id }),
   dataDir: () => invoke<string>("data_dir"),
 };
