@@ -17,8 +17,8 @@ Desktop GUI wrapper for [Claude Code](https://docs.anthropic.com/en/docs/claude-
 ## Quick start
 
 ```bash
-git clone https://github.com/<OWNER>/claude-gui.git
-cd claude-gui
+git clone https://github.com/bheejun/UseUpClaude.git
+cd UseUpClaude
 npm install
 npm run tauri dev
 ```
