@@ -1,4 +1,4 @@
-import { Bot, Check, Copy, LoaderCircle, User } from "lucide-react";
+import { Bot, Check, ChevronRight, Copy, LoaderCircle, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { MarkdownMessage } from "@/components/markdown-message";
 import { formatUsd } from "@/chat-format";
@@ -18,9 +18,15 @@ export type Bubble = {
 type ToolRow = {
   key: string;
   name: string;
+  inputPreview: string | null;
   preview: string | null;
   isError: boolean;
+  pending: boolean;
 };
+
+function nonempty(text: string): string | null {
+  return text.trim() ? text : null;
+}
 
 function toolRows(events: TurnEvent[]): ToolRow[] {
   const rows: ToolRow[] = [];
@@ -31,48 +37,122 @@ function toolRows(events: TurnEvent[]): ToolRow[] {
       rows.push({
         key: `${event.toolUseId || "use"}-${index}`,
         name: event.name,
+        inputPreview: nonempty(event.preview),
         preview: null,
         isError: false,
+        pending: true,
       });
       return;
     }
     const slot = event.toolUseId ? byId.get(event.toolUseId) : undefined;
-    if (slot != null && rows[slot].preview == null) {
-      rows[slot] = { ...rows[slot], preview: event.preview, isError: event.isError };
+    if (slot != null && rows[slot].pending) {
+      rows[slot] = {
+        ...rows[slot],
+        name: rows[slot].name || event.name,
+        preview: nonempty(event.preview),
+        isError: event.isError,
+        pending: false,
+      };
       return;
     }
     rows.push({
       key: `${event.toolUseId || "result"}-${index}`,
       name: event.name,
-      preview: event.preview,
+      inputPreview: null,
+      preview: nonempty(event.preview),
       isError: event.isError,
+      pending: false,
     });
   });
   return rows;
 }
 
+function rowPreview(row: ToolRow): string | null {
+  return row.pending ? row.inputPreview : row.preview;
+}
+
 function ToolEvents({ events }: { events: TurnEvent[] }) {
   const { t } = useI18n();
   const rows = toolRows(events);
+  const [openKeys, setOpenKeys] = useState<ReadonlySet<string>>(() => new Set());
   if (rows.length === 0) return null;
+
+  const allOpen = rows.every((row) => openKeys.has(row.key));
+  const toggle = (key: string) => {
+    setOpenKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    setOpenKeys(allOpen ? new Set() : new Set(rows.map((row) => row.key)));
+  };
+
   return (
-    <div className="mb-2 flex flex-col gap-1.5" role="group" aria-label={t("toolEvent")}>
-      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{t("toolEvent")}</p>
-      {rows.map((row) => (
-        <div key={row.key} className="rounded-md border border-border bg-card px-3 py-2 text-left">
-          <p className="font-mono text-[12px] text-foreground">{row.name}</p>
-          {row.preview ? (
-            <pre
+    <div className="mb-2 flex flex-col gap-0.5" role="group" aria-label={t("toolEvent")}>
+      {rows.length > 1 && (
+        <button
+          type="button"
+          className="self-start rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={toggleAll}
+        >
+          {allOpen ? t("collapseTools") : t("expandTools")}
+        </button>
+      )}
+      {rows.map((row) => {
+        const open = openKeys.has(row.key);
+        const preview = rowPreview(row);
+        const previewId = `tool-preview-${row.key}`;
+        return (
+          <div key={row.key}>
+            <button
+              type="button"
+              aria-expanded={open}
+              aria-controls={open && preview ? previewId : undefined}
               className={cn(
-                "m-0 mt-1 whitespace-pre-wrap break-all font-mono text-[12px]",
-                row.isError ? "text-red-100" : "text-muted-foreground",
+                "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left font-mono text-[12px] hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                row.isError ? "text-red-100" : "text-foreground",
               )}
+              onClick={() => toggle(row.key)}
             >
-              {row.preview}
-            </pre>
-          ) : null}
-        </div>
-      ))}
+              <ChevronRight
+                className={cn(
+                  "size-3 shrink-0 text-muted-foreground transition-transform",
+                  open && "rotate-90",
+                  row.isError && "text-red-100",
+                )}
+              />
+              {row.pending ? (
+                <LoaderCircle className="size-3 shrink-0 animate-spin text-primary" />
+              ) : (
+                <Check className={cn("size-3 shrink-0", row.isError ? "text-red-100" : "text-muted-foreground")} />
+              )}
+              <span className="min-w-0 flex-1 truncate">{row.name}</span>
+              <span
+                className={cn(
+                  "shrink-0 text-[10px] uppercase tracking-[0.12em]",
+                  row.isError ? "text-red-100" : "text-muted-foreground",
+                )}
+              >
+                {row.pending ? t("toolRunning") : t("toolDone")}
+              </span>
+            </button>
+            {open && preview ? (
+              <pre
+                id={previewId}
+                className={cn(
+                  "m-0 ml-6 whitespace-pre-wrap break-all font-mono text-[12px]",
+                  row.isError ? "text-red-100" : "text-muted-foreground",
+                )}
+              >
+                {preview}
+              </pre>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
