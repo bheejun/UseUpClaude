@@ -17,7 +17,7 @@ The window title and product name are UseUpClaude. The executable file is still 
 | Cost | This turn's `total_cost_usd` when the CLI reports it |
 | Balance | A normal API key cannot read remaining credit. The console is not scraped |
 | Projects | Chats grouped by working folder (cwd) |
-| Existing sessions | Reads session id, folder, and a short title from `~/.claude/projects`, then `--resume`. Transcripts are not imported |
+| Existing sessions | Reads the JSONL tip under `~/.claude/projects`, imports user/assistant text for display, then `--resume` from the latest tip on each send |
 | Languages | 한국어, English, 日本語, 简体中文, Español. OS locale, otherwise Korean |
 | Auth | Paste an Anthropic API key in Settings. It stays in the OS credential store and is not logged |
 

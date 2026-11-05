@@ -177,6 +177,10 @@ pub struct GuiSession {
     /// each `cost_usd` is that turn only.
     #[serde(default)]
     pub turn_costs_are_incremental: bool,
+    /// Latest Claude Code JSONL tip (`uuid`) this GUI session last synced from.
+    /// Used to detect a newer branch tip before `--resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_tip_uuid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -96,6 +96,8 @@ export interface GuiSession {
   createdAt: string;
   updatedAt: string;
   turns: GuiTurn[];
+  /** Latest Claude Code JSONL tip uuid this chat last synced from. */
+  cliTipUuid?: string | null;
 }
 
 export interface SessionSummary {
