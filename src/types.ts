@@ -1,6 +1,13 @@
 export type TurnRole = "user" | "assistant" | "system" | "error";
 export type TurnStatus = "pending" | "done" | "failed" | "cancelled";
-export type TurnEventKind = "tool_use" | "tool_result";
+export type TurnEventKind =
+  | "tool_use"
+  | "tool_result"
+  | "task_started"
+  | "task_progress"
+  | "task_updated"
+  | "task_notification"
+  | "background_tasks_changed";
 
 export interface TurnEvent {
   kind: TurnEventKind;
