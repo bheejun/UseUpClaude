@@ -316,33 +316,3 @@ pub struct CliEnvelope {
     pub total_cost_usd: Option<f64>,
     pub is_error: bool,
 }
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum BoardStatus {
-    Progress,
-    Done,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BoardCard {
-    pub id: Uuid,
-    pub number: u32,
-    pub title: String,
-    pub tag: String,
-    pub status: BoardStatus,
-    /// The turn failed. The card stays in the in-progress column.
-    #[serde(default)]
-    pub failed: bool,
-    /// Chat turn this card tracks. Manual cards leave this empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<Uuid>,
-}
-
-/// Board for one project folder. Library files live in that folder, not here.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectWorkspace {
-    pub cards: Vec<BoardCard>,
-}

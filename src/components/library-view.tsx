@@ -45,6 +45,12 @@ function isMarkdownName(name: string): boolean {
   return lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".mdx") || lower.endsWith(".mdown");
 }
 
+/** Recents policy: .md, .txt, and .mdx only. */
+function isRecentName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".txt") || lower.endsWith(".mdx");
+}
+
 function FileGlyph({ name, className }: { name: string; className?: string }) {
   return isMarkdownName(name) ? <Sparkles className={className} /> : <File className={className} />;
 }
@@ -133,8 +139,8 @@ export function LibraryView({
     void api
       .recentProjectFiles(sessionId)
       .then((rows) => {
-        // Cursor Recents are content preview cards — markdown documents only.
-        setRecents(rows.filter((file) => file.kind === "markdown"));
+        // Recents preview cards: .md, .txt, and .mdx only.
+        setRecents(rows.filter((file) => isRecentName(file.name)));
         setRecentsStatus("ready");
       })
       .catch(() => {
@@ -160,7 +166,7 @@ export function LibraryView({
     const key = folderKey(cwd);
     let unlisten: (() => void) | undefined;
     let cancelled = false;
-    void listen<{ cwd: string }>("project-workspace", (event) => {
+    void listen<{ cwd: string }>("project-files", (event) => {
       if (folderKey(event.payload.cwd) !== key) return;
       refresh();
     }).then((fn) => {
@@ -402,7 +408,13 @@ export function LibraryView({
                     onClick={() => openFile(file.path)}
                   >
                     <div className="pointer-events-none h-36 overflow-hidden px-2 py-1.5">
-                      <MarkdownMessage text={file.preview} />
+                      {file.kind === "markdown" ? (
+                        <MarkdownMessage text={file.preview} />
+                      ) : (
+                        <pre className="m-0 whitespace-pre-wrap font-mono text-[10px] leading-snug text-foreground/90">
+                          {file.preview}
+                        </pre>
+                      )}
                     </div>
                     <span className="truncate border-t border-border px-2 py-1.5 text-[11px] text-muted-foreground">
                       {file.name}

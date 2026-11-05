@@ -9,7 +9,6 @@ import type {
   ProjectDirListing,
   ProjectFileIndex,
   ProjectFileView,
-  ProjectWorkspace,
   RecentProjectFile,
   ModelCatalog,
   ProjectSkill,
@@ -49,9 +48,6 @@ export const api = {
     invoke<ProjectFileIndex>("list_project_files", { sessionId }),
   locateProjectFiles: (sessionId: string, paths: string[]) =>
     invoke<string[]>("locate_project_files", { sessionId, paths }),
-  getProjectWorkspace: (cwd: string) => invoke<ProjectWorkspace>("get_project_workspace", { cwd }),
-  saveProjectWorkspace: (cwd: string, workspace: ProjectWorkspace) =>
-    invoke<ProjectWorkspace>("save_project_workspace", { cwd, workspace }),
   deleteSession: (id: string) => invoke<void>("delete_session", { id }),
   createSession: (args: {
     cwd: string;

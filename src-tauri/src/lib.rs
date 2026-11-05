@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use store::{AppStore, TurnCardPhase};
+use store::AppStore;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -362,43 +362,22 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
 }
 
 const TURN_EVENT: &str = "turn-event";
-const WORKSPACE_EVENT: &str = "project-workspace";
+const PROJECT_FILES_EVENT: &str = "project-files";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectWorkspaceEvent {
+struct ProjectFilesEvent {
     cwd: String,
 }
 
-fn note_turn_card(
-    state: &AppState,
-    app: &AppHandle,
-    cwd: &str,
-    turn_id: Uuid,
-    title: &str,
-    phase: TurnCardPhase,
-) {
-    if state
-        .store
-        .upsert_turn_card(cwd, turn_id, title, phase)
-        .is_err()
-    {
-        return;
-    }
+/// Library Recents / folder tree refresh after a chat turn may have written files.
+fn notify_project_files(app: &AppHandle, cwd: &str) {
     let _ = app.emit(
-        WORKSPACE_EVENT,
-        ProjectWorkspaceEvent {
+        PROJECT_FILES_EVENT,
+        ProjectFilesEvent {
             cwd: cwd.to_string(),
         },
     );
-}
-
-fn card_title(prompt: &str) -> String {
-    let line = prompt
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or(prompt);
-    truncate(line.trim(), 120)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -517,27 +496,11 @@ async fn send_message(
     session.turns.push(pending);
     session.updated_at = Utc::now();
     state.store.save_session(&session).map_err(err)?;
-    let card_title = card_title(&prompt);
-    note_turn_card(
-        &state,
-        &app,
-        &session.cwd,
-        pending_id,
-        &card_title,
-        TurnCardPhase::Progress,
-    );
 
     if !cwd.is_dir() {
         let msg = format!("cwd does not exist: {}", session.cwd);
         let response = fail_pending(&state, session, pending_id, msg, None, Vec::new())?;
-        note_turn_card(
-            &state,
-            &app,
-            &response.session.cwd,
-            pending_id,
-            &card_title,
-            TurnCardPhase::Failed,
-        );
+        notify_project_files(&app, &response.session.cwd);
         return Ok(response);
     }
 
@@ -629,18 +592,7 @@ async fn send_message(
             let assistant_turn = turn.clone();
             session.updated_at = Utc::now();
             state.store.save_session(&session).map_err(err)?;
-            note_turn_card(
-                &state,
-                &app,
-                &session.cwd,
-                pending_id,
-                &card_title,
-                if is_cli_error {
-                    TurnCardPhase::Failed
-                } else {
-                    TurnCardPhase::Done
-                },
-            );
+            notify_project_files(&app, &session.cwd);
 
             if is_cli_error {
                 // Still return session so UI can show the error bubble;
@@ -661,14 +613,7 @@ async fn send_message(
                 None,
                 seen_events(&seen),
             )?;
-            note_turn_card(
-                &state,
-                &app,
-                &response.session.cwd,
-                pending_id,
-                &card_title,
-                TurnCardPhase::Failed,
-            );
+            notify_project_files(&app, &response.session.cwd);
             Ok(response)
         }
         Err(e) => {
@@ -680,14 +625,7 @@ async fn send_message(
                 None,
                 seen_events(&seen),
             )?;
-            note_turn_card(
-                &state,
-                &app,
-                &response.session.cwd,
-                pending_id,
-                &card_title,
-                TurnCardPhase::Failed,
-            );
+            notify_project_files(&app, &response.session.cwd);
             Ok(response)
         }
     }
@@ -779,23 +717,6 @@ fn locate_project_files(
         }
     }
     Ok(kept)
-}
-
-#[tauri::command]
-fn get_project_workspace(
-    state: State<'_, AppState>,
-    cwd: String,
-) -> Result<ProjectWorkspace, String> {
-    state.store.load_workspace(&cwd).map_err(err)
-}
-
-#[tauri::command]
-fn save_project_workspace(
-    state: State<'_, AppState>,
-    cwd: String,
-    workspace: ProjectWorkspace,
-) -> Result<ProjectWorkspace, String> {
-    state.store.save_workspace(&cwd, &workspace).map_err(err)
 }
 
 fn load_session(state: &AppState, id: Uuid) -> Result<GuiSession, String> {
@@ -1049,8 +970,6 @@ pub fn run() {
             recent_project_files,
             list_project_files,
             locate_project_files,
-            get_project_workspace,
-            save_project_workspace,
             set_session_model,
             set_session_effort,
             set_session_fast_mode,
@@ -1070,15 +989,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn card_title_uses_the_first_line() {
-        assert_eq!(card_title("  Fix the board  \nmore"), "Fix the board");
-        let long = "가".repeat(200);
-        let title = card_title(&long);
-        assert_eq!(title.chars().count(), 121);
-        assert!(title.ends_with('…'));
-    }
 
     fn turn(cost: Option<f64>) -> GuiTurn {
         let now = Utc::now();
