@@ -35,6 +35,8 @@ export const api = {
   getSession: (id: string) => invoke<GuiSession>("get_session", { id }),
   readProjectFile: (sessionId: string, path: string) =>
     invoke<ProjectFileView>("read_project_file", { sessionId, path }),
+  locateProjectFiles: (sessionId: string, paths: string[]) =>
+    invoke<string[]>("locate_project_files", { sessionId, paths }),
   deleteSession: (id: string) => invoke<void>("delete_session", { id }),
   createSession: (args: {
     cwd: string;

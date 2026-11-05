@@ -173,3 +173,17 @@ select {
   color: var(--primary);
   text-underline-offset: 2px;
 }
+
+.md .file-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
