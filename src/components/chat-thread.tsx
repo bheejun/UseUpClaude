@@ -1,6 +1,7 @@
 import { Bot, Check, ChevronRight, Copy, LoaderCircle, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { MarkdownMessage } from "@/components/markdown-message";
+import { producedFilePaths } from "@/produced-files";
 import { formatUsd } from "@/chat-format";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
@@ -197,7 +198,19 @@ function relativeLabel(
   return t("daysAgo", { n: Math.floor(hours / 24) });
 }
 
-function ChatBubble({ bubble, now }: { bubble: Bubble; now: number }) {
+function ChatBubble({
+  bubble,
+  now,
+  cwd,
+  sessionId,
+  onOpenFile,
+}: {
+  bubble: Bubble;
+  now: number;
+  cwd: string;
+  sessionId: string;
+  onOpenFile?: (path: string) => void;
+}) {
   const { t } = useI18n();
   const bodyRef = useRef<HTMLDivElement>(null);
   const mine = bubble.role === "user";
@@ -233,7 +246,17 @@ function ChatBubble({ bubble, now }: { bubble: Bubble; now: number }) {
               bubble.role === "system" && "border-border bg-card text-muted-foreground",
             )}
           >
-            {mine || bubble.role === "system" ? bubble.text : <MarkdownMessage text={bubble.text} />}
+            {mine || bubble.role === "system" ? (
+              bubble.text
+            ) : (
+              <MarkdownMessage
+                text={bubble.text}
+                cwd={bubble.role === "assistant" ? cwd : undefined}
+                sessionId={bubble.role === "assistant" ? sessionId : undefined}
+                producedPaths={bubble.role === "assistant" ? producedFilePaths(events) : undefined}
+                onOpenFile={bubble.role === "assistant" ? onOpenFile : undefined}
+              />
+            )}
           </div>
         )}
         {bubble.role === "assistant" && bubble.text.trim() && (
@@ -301,9 +324,15 @@ function AssistantActions({
 export function ChatThread({
   bubbles,
   thinking,
+  cwd,
+  sessionId,
+  onOpenFile,
 }: {
   bubbles: Bubble[];
   thinking: boolean;
+  cwd: string;
+  sessionId: string;
+  onOpenFile?: (path: string) => void;
 }) {
   const { t } = useI18n();
   const endRef = useRef<HTMLDivElement>(null);
@@ -321,7 +350,14 @@ export function ChatThread({
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 py-6">
       {bubbles.map((bubble) => (
-        <ChatBubble key={bubble.id} bubble={bubble} now={now} />
+        <ChatBubble
+          key={bubble.id}
+          bubble={bubble}
+          now={now}
+          cwd={cwd}
+          sessionId={sessionId}
+          onOpenFile={onOpenFile}
+        />
       ))}
       {thinking && (
         <article className="flex gap-3">

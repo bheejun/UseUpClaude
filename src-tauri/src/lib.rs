@@ -618,6 +618,24 @@ fn read_project_file(
     project_file::read_in_project(Path::new(&session.cwd), &path)
 }
 
+/// Paths from an answer that are files inside the session project. No file bodies.
+#[tauri::command]
+fn locate_project_files(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let session = load_session(&state, session_id)?;
+    let cwd = Path::new(&session.cwd);
+    let mut kept = Vec::new();
+    for path in paths.into_iter().take(48) {
+        if project_file::locate_in_project(cwd, &path).is_ok() {
+            kept.push(path);
+        }
+    }
+    Ok(kept)
+}
+
 fn load_session(state: &AppState, id: Uuid) -> Result<GuiSession, String> {
     let mut session = state.store.get_session(id).map_err(err)?;
     if prepare_session(&mut session) {
@@ -858,6 +876,7 @@ pub fn run() {
             list_sessions,
             get_session,
             read_project_file,
+            locate_project_files,
             set_session_model,
             set_session_effort,
             set_session_fast_mode,

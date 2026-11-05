@@ -11,25 +11,28 @@ export function FilePanel({
   sessionId,
   cwd,
   paths,
+  activePath,
+  onActivePath,
   onClose,
 }: {
   sessionId: string;
   cwd: string;
   paths: string[];
+  activePath: string | null;
+  onActivePath: (path: string | null) => void;
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const [openPath, setOpenPath] = useState<string | null>(null);
   const [view, setView] = useState<ProjectFileView | null>(null);
   const [loading, setLoading] = useState(false);
   const [missing, setMissing] = useState(false);
 
   useEffect(() => {
-    if (openPath && !paths.includes(openPath)) setOpenPath(null);
-  }, [openPath, paths]);
+    if (activePath && !paths.includes(activePath)) onActivePath(null);
+  }, [activePath, paths, onActivePath]);
 
   useEffect(() => {
-    if (!openPath) {
+    if (!activePath) {
       setView(null);
       setMissing(false);
       setLoading(false);
@@ -40,7 +43,7 @@ export function FilePanel({
     setMissing(false);
     setView(null);
     void api
-      .readProjectFile(sessionId, openPath)
+      .readProjectFile(sessionId, activePath)
       .then((next) => {
         if (!cancelled) setView(next);
       })
@@ -53,7 +56,7 @@ export function FilePanel({
     return () => {
       cancelled = true;
     };
-  }, [openPath, sessionId]);
+  }, [activePath, sessionId]);
 
   return (
     <aside
@@ -75,7 +78,7 @@ export function FilePanel({
       </div>
       <ul className="max-h-[40%] shrink-0 overflow-y-auto border-b border-border py-1" aria-label={t("producedFiles")}>
         {paths.map((path) => {
-          const selected = path === openPath;
+          const selected = path === activePath;
           return (
             <li key={path}>
               <button
@@ -86,7 +89,7 @@ export function FilePanel({
                 )}
                 title={path}
                 aria-current={selected ? "true" : undefined}
-                onClick={() => setOpenPath(path)}
+                onClick={() => onActivePath(path)}
               >
                 {projectRelativePath(path, cwd)}
               </button>
@@ -95,18 +98,18 @@ export function FilePanel({
         })}
       </ul>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {!openPath && <p className="text-[13px] leading-relaxed text-muted-foreground">{t("producedFilesHint")}</p>}
-        {openPath && loading && <p className="text-[13px] text-muted-foreground">{t("filePreviewLoading")}</p>}
-        {openPath && missing && (
+        {!activePath && <p className="text-[13px] leading-relaxed text-muted-foreground">{t("producedFilesHint")}</p>}
+        {activePath && loading && <p className="text-[13px] text-muted-foreground">{t("filePreviewLoading")}</p>}
+        {activePath && missing && (
           <p className="text-[13px] leading-relaxed text-muted-foreground">{t("filePreviewMissing")}</p>
         )}
-        {openPath && view?.kind === "unsupported" && (
+        {activePath && view?.kind === "unsupported" && (
           <div>
             <p className="break-all font-mono text-[12px] text-foreground">{view.path}</p>
             <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">{t("filePreviewUnsupported")}</p>
           </div>
         )}
-        {openPath && view && view.kind !== "unsupported" && view.content != null && (
+        {activePath && view && view.kind !== "unsupported" && view.content != null && (
           <div>
             {view.truncated && (
               <p className="mb-2 text-[12px] text-muted-foreground">{t("filePreviewTruncated")}</p>

@@ -50,6 +50,16 @@ fn unsupported(path: String) -> ProjectFileView {
     }
 }
 
+/// Whether `raw` is a file inside `cwd`. Does not read the body.
+pub(crate) fn locate_in_project(cwd: &Path, raw_path: &str) -> Result<(), String> {
+    let full = resolve_inside(cwd, raw_path)?;
+    if full.is_file() {
+        Ok(())
+    } else {
+        Err("not a file".into())
+    }
+}
+
 fn resolve_inside(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
     let cwd = cwd
         .canonicalize()
@@ -65,19 +75,40 @@ fn resolve_inside(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
         cwd.join(requested)
     };
     let lexical = normalize_lexical(&joined).ok_or_else(|| "bad path".to_string())?;
-    if !lexical.starts_with(&cwd) {
+    // Relative paths are judged before canonicalize so `../` cannot leave the
+    // folder. Absolute paths wait until both sides are canonical: on Windows
+    // `canonicalize` adds `\\?\`, and a junction's stored name differs from
+    // the folder the session was opened with. Either mismatch used to reject
+    // a file that still lands inside the project.
+    if !requested.is_absolute() && !starts_inside(&lexical, &cwd) {
         return Err("outside project".into());
     }
-    match lexical.canonicalize() {
-        Ok(real) => {
-            if real.starts_with(&cwd) {
-                Ok(real)
-            } else {
-                Err("outside project".into())
-            }
-        }
-        Err(_) => Err("missing file".into()),
+    let real = lexical
+        .canonicalize()
+        .map_err(|_| "missing file".to_string())?;
+    if starts_inside(&real, &cwd) {
+        Ok(real)
+    } else {
+        Err("outside project".into())
     }
+}
+
+fn starts_inside(path: &Path, root: &Path) -> bool {
+    let path = strip_verbatim(path);
+    let root = strip_verbatim(root);
+    path.starts_with(&root) && path != root
+}
+
+/// `\\?\C:\proj` and `C:\proj` are the same folder. UNC verbatim prefixes too.
+fn strip_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    path.to_path_buf()
 }
 
 fn normalize_lexical(path: &Path) -> Option<PathBuf> {
@@ -210,8 +241,47 @@ mod tests {
         assert!(read_in_project(&root, "../secret.txt").is_err());
         assert!(read_in_project(&root, "/etc/passwd").is_err());
         assert!(read_in_project(&root, "nested").is_err());
+        assert!(locate_in_project(&root, "nested").is_err());
+        assert!(locate_in_project(&root, "notes.md").is_ok());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn display_path(path: &Path) -> PathBuf {
+        let text = path.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        PathBuf::from(text)
+    }
+
+    #[test]
+    fn absolute_display_path_reads_when_cwd_is_not_verbatim() {
+        let root = scratch();
+        fs::write(root.join("STATUS.md"), "status").unwrap();
+        let outside = scratch();
+        fs::write(outside.join("secret.txt"), "nope").unwrap();
+        let cwd = display_path(&root);
+        let file = cwd.join("STATUS.md");
+        let raw = file.to_str().unwrap();
+        assert!(Path::new(raw).is_absolute());
+        if root.to_string_lossy().starts_with(r"\\?\") {
+            assert_ne!(cwd, root);
+        }
+
+        let view = read_in_project(&cwd, raw).unwrap();
+        assert_eq!(view.kind, ProjectFileKind::Markdown);
+        assert_eq!(view.content.as_deref(), Some("status"));
+        let relative = read_in_project(&cwd, "STATUS.md").unwrap();
+        assert_eq!(relative.content.as_deref(), Some("status"));
+
+        let secret = display_path(&outside).join("secret.txt");
+        assert!(read_in_project(&cwd, secret.to_str().unwrap()).is_err());
+        assert!(locate_in_project(&cwd, secret.to_str().unwrap()).is_err());
+        let sibling = outside.file_name().unwrap().to_string_lossy();
+        let climbed = format!("../{sibling}/secret.txt");
+        assert!(read_in_project(&root, &climbed).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -227,6 +297,47 @@ mod tests {
         assert!(content.len() < huge.len());
         assert!(!content.contains('\0'));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_name_still_reads_and_an_outside_junction_does_not() {
+        let real = scratch();
+        fs::write(real.join("notes.md"), "inside").unwrap();
+        let link_root = scratch();
+        let link = link_root.join("proj");
+        junction(&link, &real);
+        let via = link.join("notes.md");
+        let through_alias = read_in_project(&real, via.to_str().unwrap()).unwrap();
+        assert_eq!(through_alias.content.as_deref(), Some("inside"));
+        let opened_as_alias = read_in_project(&link, via.to_str().unwrap()).unwrap();
+        assert_eq!(opened_as_alias.content.as_deref(), Some("inside"));
+
+        let outside = scratch();
+        fs::write(outside.join("secret.txt"), "nope").unwrap();
+        let leak = real.join("leak");
+        junction(&leak, &outside);
+        assert!(read_in_project(&real, leak.join("secret.txt").to_str().unwrap()).is_err());
+        assert!(read_in_project(&link, "leak/secret.txt").is_err());
+
+        let _ = fs::remove_dir(&leak);
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&link_root);
+        let _ = fs::remove_dir_all(&real);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(display_path(link))
+            .arg(display_path(target))
+            .status()
+            .expect("spawn mklink");
+        assert!(status.success(), "mklink /J failed");
     }
 
     #[cfg(unix)]

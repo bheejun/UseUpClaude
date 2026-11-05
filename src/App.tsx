@@ -8,7 +8,7 @@ import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-forma
 import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { FilePanel } from "@/components/file-panel";
-import { producedFilePaths } from "@/produced-files";
+import { producedFilePaths, sameProjectFile } from "@/produced-files";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
 import { SessionCostsDialog } from "@/components/session-costs-dialog";
@@ -405,7 +405,32 @@ export default function App() {
   );
   const fileSignature = `${active?.id ?? ""}:${producedPaths.join("\0")}`;
   const [dismissedFiles, setDismissedFiles] = useState<string | null>(null);
-  const filesOpen = producedPaths.length > 0 && dismissedFiles !== fileSignature;
+  const [openedFile, setOpenedFile] = useState<{ sessionId: string; path: string } | null>(null);
+  const openedPath = active && openedFile?.sessionId === active.id ? openedFile.path : null;
+  const panelPaths = useMemo(() => {
+    if (openedPath && !producedPaths.includes(openedPath)) return [...producedPaths, openedPath];
+    return producedPaths;
+  }, [openedPath, producedPaths]);
+  const filesOpen = openedPath != null || (producedPaths.length > 0 && dismissedFiles !== fileSignature);
+  const openProjectFile = useCallback(
+    (path: string) => {
+      if (!active) return;
+      const match = producedPaths.find((item) => sameProjectFile(item, path, active.cwd)) ?? path;
+      setDismissedFiles(null);
+      setOpenedFile({ sessionId: active.id, path: match });
+    },
+    [active, producedPaths],
+  );
+  const choosePanelPath = useCallback(
+    (path: string | null) => {
+      if (!active || !path) {
+        setOpenedFile(null);
+        return;
+      }
+      setOpenedFile({ sessionId: active.id, path });
+    },
+    [active],
+  );
 
   useEffect(() => {
     if (!active || sessionBusy || !active.fastMode || supportsFastMode(active.model)) return;
@@ -656,7 +681,13 @@ export default function App() {
                       {active.cliSessionId ? t("resumedEmpty") : t("emptyThread")}
                     </p>
                   )}
-                  <ChatThread bubbles={bubbles} thinking={sessionBusy} />
+                  <ChatThread
+                    bubbles={bubbles}
+                    thinking={sessionBusy}
+                    cwd={active.cwd}
+                    sessionId={active.id}
+                    onOpenFile={openProjectFile}
+                  />
                 </>
               )}
             </div>
@@ -852,8 +883,13 @@ export default function App() {
                 key={active.id}
                 sessionId={active.id}
                 cwd={active.cwd}
-                paths={producedPaths}
-                onClose={() => setDismissedFiles(fileSignature)}
+                paths={panelPaths}
+                activePath={openedPath}
+                onActivePath={choosePanelPath}
+                onClose={() => {
+                  setOpenedFile(null);
+                  setDismissedFiles(fileSignature);
+                }}
               />
             )}
             </div>
