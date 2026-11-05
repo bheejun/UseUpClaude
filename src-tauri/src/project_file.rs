@@ -12,7 +12,7 @@ const PANEL_MAX_BYTES: usize = 512 * 1024;
 /// Children returned for one folder. The rest stay on disk until the next listing.
 const DIR_LIST_LIMIT: usize = 400;
 
-/// Files walked for recents and the open-file picker.
+/// Files walked for the open-file picker and markdown Recents candidates.
 const INDEX_FILE_LIMIT: usize = 4000;
 const INDEX_DIR_LIMIT: usize = 500;
 const RECENT_LIMIT: usize = 12;
@@ -211,10 +211,17 @@ pub(crate) fn index_in_project(cwd: &Path) -> Result<ProjectFileIndex, String> {
     Ok(ProjectFileIndex { files, truncated })
 }
 
-/// Newest files in the project folder, with a short snippet for the recent cards.
-/// Snippets are not stored on the session.
+/// Newest previewable documents for the Recents cards.
+/// Matches Cursor's library Recents: markdown (and .mdx/.markdown/.mdown) only.
+/// Binaries, images, folders, and other non-previewable paths stay out.
+/// Snippets are not stored on the session. All Files still lists every path.
 pub(crate) fn recent_in_project(cwd: &Path) -> Result<Vec<RecentProjectFile>, String> {
     let mut files = index_in_project(cwd)?.files;
+    files.retain(|file| {
+        resolve_inside(cwd, &file.path)
+            .ok()
+            .is_some_and(|path| is_markdown_extension(&path))
+    });
     files.sort_by(|left, right| {
         right
             .modified_ms
@@ -224,10 +231,14 @@ pub(crate) fn recent_in_project(cwd: &Path) -> Result<Vec<RecentProjectFile>, St
     files.truncate(RECENT_LIMIT);
     let mut recent = Vec::with_capacity(files.len());
     for file in files {
-        let (kind, preview) = match resolve_inside(cwd, &file.path) {
-            Ok(path) => read_preview(&path),
-            Err(_) => (ProjectFileKind::Unsupported, String::new()),
+        let Ok(path) = resolve_inside(cwd, &file.path) else {
+            continue;
         };
+        let (kind, preview) = read_preview(&path);
+        // Opening or touching a non-previewable file must not land here.
+        if kind != ProjectFileKind::Markdown {
+            continue;
+        }
         recent.push(RecentProjectFile {
             name: file.name,
             path: file.path,
@@ -651,27 +662,30 @@ mod tests {
     }
 
     #[test]
-    fn recents_read_the_project_folder_and_skip_dependency_trees() {
+    fn recents_only_include_previewable_markdown_documents() {
         let root = scratch();
         fs::create_dir(root.join("docs")).unwrap();
         fs::write(root.join("docs").join("notes.md"), "# Hello\n\nbody").unwrap();
+        fs::write(root.join("guide.markdown"), "title").unwrap();
         fs::write(root.join("plain.txt"), "just text").unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
         fs::write(root.join("pic.png"), [0_u8, 1, 2, 3]).unwrap();
         fs::create_dir(root.join("node_modules")).unwrap();
         fs::write(root.join("node_modules").join("pkg.js"), "ignore").unwrap();
+        fs::create_dir(root.join("empty-dir")).unwrap();
 
         let recent = recent_in_project(&root).unwrap();
+        assert!(recent.iter().all(|file| file.kind == ProjectFileKind::Markdown));
         let notes = recent.iter().find(|file| file.path == "docs/notes.md").unwrap();
-        assert_eq!(notes.kind, ProjectFileKind::Markdown);
         assert!(notes.preview.contains("# Hello"));
         assert!(notes.modified_ms > 0);
-        let plain = recent.iter().find(|file| file.path == "plain.txt").unwrap();
-        assert_eq!(plain.kind, ProjectFileKind::Text);
-        assert!(plain.preview.contains("just text"));
-        let image = recent.iter().find(|file| file.name == "pic.png").unwrap();
-        assert_eq!(image.kind, ProjectFileKind::Unsupported);
-        assert!(image.preview.is_empty());
+        assert!(recent.iter().any(|file| file.path == "guide.markdown"));
+        assert!(recent.iter().all(|file| file.path != "plain.txt"));
+        assert!(recent.iter().all(|file| file.path != "main.rs"));
+        assert!(recent.iter().all(|file| file.name != "pic.png"));
         assert!(recent.iter().all(|file| file.name != "pkg.js"));
+        assert!(recent.iter().all(|file| file.name != "empty-dir"));
+        assert_eq!(recent.len(), 2);
 
         let index = index_in_project(&root).unwrap();
         assert!(index
@@ -680,6 +694,27 @@ mod tests {
             .all(|file| !file.path.contains("node_modules")));
         assert!(!index.truncated);
         assert!(index.files.iter().any(|file| file.path == "docs/notes.md"));
+        assert!(index.files.iter().any(|file| file.path == "plain.txt"));
+        assert!(index.files.iter().any(|file| file.name == "pic.png"));
+
+        let listed = list_in_project(&root, "").unwrap();
+        assert!(listed.entries.iter().any(|entry| entry.name == "plain.txt"));
+        assert!(listed.entries.iter().any(|entry| entry.name == "pic.png"));
+        assert!(listed.entries.iter().any(|entry| entry.name == "empty-dir" && entry.is_dir));
+
+        // Newer non-previewable files must not push markdown out of Recents,
+        // and must not appear there when opened or touched on disk.
+        for index in 0..20 {
+            fs::write(root.join(format!("newer-{index}.bin")), [0_u8, 1, 2]).unwrap();
+            fs::write(root.join(format!("newer-{index}.txt")), "touch").unwrap();
+        }
+        let after_touch = recent_in_project(&root).unwrap();
+        assert_eq!(after_touch.len(), 2);
+        assert!(after_touch.iter().all(|file| file.kind == ProjectFileKind::Markdown));
+        assert!(after_touch.iter().any(|file| file.path == "docs/notes.md"));
+        assert!(after_touch
+            .iter()
+            .all(|file| !file.name.starts_with("newer-")));
 
         let _ = fs::remove_dir_all(&root);
     }

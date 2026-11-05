@@ -133,7 +133,8 @@ export function LibraryView({
     void api
       .recentProjectFiles(sessionId)
       .then((rows) => {
-        setRecents(rows);
+        // Cursor Recents are content preview cards — markdown documents only.
+        setRecents(rows.filter((file) => file.kind === "markdown"));
         setRecentsStatus("ready");
       })
       .catch(() => {
@@ -401,15 +402,7 @@ export function LibraryView({
                     onClick={() => openFile(file.path)}
                   >
                     <div className="pointer-events-none h-36 overflow-hidden px-2 py-1.5">
-                      {file.kind === "markdown" && file.preview ? (
-                        <MarkdownMessage text={file.preview} />
-                      ) : file.preview ? (
-                        <pre className="m-0 whitespace-pre-wrap font-mono text-[10px] leading-snug text-foreground/90">
-                          {file.preview}
-                        </pre>
-                      ) : (
-                        <p className="text-[11px] text-muted-foreground">{t("filePreviewUnsupported")}</p>
-                      )}
+                      <MarkdownMessage text={file.preview} />
                     </div>
                     <span className="truncate border-t border-border px-2 py-1.5 text-[11px] text-muted-foreground">
                       {file.name}
