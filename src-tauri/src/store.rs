@@ -98,18 +98,6 @@ impl AppStore {
         Ok(out)
     }
 
-    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
-        let index = self.load_index()?;
-        let mut out = Vec::new();
-        for id in index.sessions {
-            if let Ok(session) = self.get_session(id) {
-                out.push(SessionSummary::from(&session));
-            }
-        }
-        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(out)
-    }
-
     pub fn get_session(&self, id: Uuid) -> Result<GuiSession, StoreError> {
         let path = self.session_path(id);
         if !path.exists() {

@@ -3,6 +3,7 @@ mod cli;
 mod discover;
 mod models;
 mod project_file;
+mod repair;
 mod secrets;
 mod skills;
 mod store;
@@ -161,7 +162,16 @@ async fn detect_claude(state: State<'_, AppState>) -> Result<ClaudeDetectResult,
 
 #[tauri::command]
 fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
-    state.store.list_sessions().map_err(err)
+    let mut sessions = state.store.load_sessions().map_err(err)?;
+    let mut summaries = Vec::with_capacity(sessions.len());
+    for session in &mut sessions {
+        // One-shot repair for stuck `(empty response)` turns while listing.
+        if prepare_session(session) && !state.runs.contains(session.id) {
+            state.store.save_session(session).map_err(err)?;
+        }
+        summaries.push(SessionSummary::from(&*session));
+    }
+    Ok(summaries)
 }
 
 #[tauri::command]
@@ -688,7 +698,8 @@ fn load_session(state: &AppState, id: Uuid) -> Result<GuiSession, String> {
 fn prepare_session(session: &mut GuiSession) -> bool {
     let sanitized = sanitize_session(session);
     let normalized = normalize_stored_turn_costs(session);
-    sanitized || normalized
+    let recovered = repair::recover_empty_response_turns(session);
+    sanitized || normalized || recovered
 }
 
 /// Older builds stored the raw `--output-format json` object as the assistant

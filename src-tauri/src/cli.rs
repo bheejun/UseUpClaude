@@ -315,14 +315,16 @@ pub struct RunOutput {
 struct StreamParse {
     events: Vec<TurnEvent>,
     envelope: Option<CliEnvelope>,
-    /// A `result` line is the CLI's own envelope. It wins over assistant text.
+    /// A `result` line is the CLI's own envelope. It wins over assistant text
+    /// from the same turn. A later finished assistant (follow-up after background
+    /// work) clears this so that turn's text can replace an earlier result until
+    /// its own result line arrives.
     result_seen: bool,
-    /// The turn's answer is complete: a finished assistant stop, or a result line.
+    /// A finished assistant stop or a result line was seen. Used by tests; the
+    /// run loop waits for process exit / stdout EOF instead of this flag.
     answer_ready: bool,
 }
 
-/// After a finished assistant message, wait briefly for a trailing result line.
-const ANSWER_GRACE: Duration = Duration::from_millis(300);
 /// After the process exits, do not wait out the turn timeout for pipe EOF.
 const EXIT_DRAIN: Duration = Duration::from_millis(500);
 
@@ -391,7 +393,6 @@ pub async fn run_claude_managed(
     let mut stderr_done = false;
     let mut stdin_done = stdin.is_none();
     let mut exit_code: Option<i32> = None;
-    let mut answer_grace_until: Option<Instant> = None;
     let mut exit_drain_until: Option<Instant> = None;
 
     let mut stdin_task = std::pin::pin!(async move {
@@ -436,7 +437,7 @@ pub async fn run_claude_managed(
         }
     });
 
-    let deadline = Instant::now() + Duration::from_secs(spec.timeout_secs.max(30));
+    let deadline = Instant::now() + Duration::from_secs(spec.timeout_secs.max(1));
 
     loop {
         if active.cancel_flag.load(Ordering::SeqCst) {
@@ -445,31 +446,24 @@ pub async fn run_claude_managed(
         }
 
         let now = Instant::now();
-        if streamed.result_seen || (stdout_done && stderr_done && exit_code.is_some()) {
+        // Keep the child open past the first `result` / `end_turn`. Background
+        // work and a follow-up turn can still arrive on stdout before EOF.
+        if stdout_done && stderr_done && exit_code.is_some() {
             break;
         }
         if now >= deadline {
-            // A finished answer still counts if the clock runs out while we drain.
-            if streamed.envelope.is_some() {
-                break;
-            }
             kill_active(&active).await;
             return Err(CliError::TimedOut(spec.timeout_secs));
         }
 
-        if streamed.answer_ready && answer_grace_until.is_none() {
-            answer_grace_until = Some(now + ANSWER_GRACE);
-        }
         if exit_code.is_some() && exit_drain_until.is_none() {
             exit_drain_until = Some(now + EXIT_DRAIN);
         }
-        if answer_grace_until.is_some_and(|at| now >= at)
-            || exit_drain_until.is_some_and(|at| now >= at)
-        {
+        if exit_drain_until.is_some_and(|at| now >= at) {
             break;
         }
 
-        let wake = [Some(deadline), answer_grace_until, exit_drain_until]
+        let wake = [Some(deadline), exit_drain_until]
             .into_iter()
             .flatten()
             .min()
@@ -588,12 +582,28 @@ fn finish_run_output(
     streamed: StreamParse,
 ) -> RunOutput {
     let StreamParse {
-        events, envelope, ..
+        events,
+        envelope,
+        answer_ready,
+        ..
     } = streamed;
     // A result line wins. Pretty-printed `--output-format json` still has no
     // one-line objects, so the whole-document scan remains the fallback.
     if let Some(env) = envelope.or_else(|| interpret_cli_text(stdout)) {
         return output_from_envelope(exit_code, env, events);
+    }
+    // Finished assistant stop with no visible text and no result line.
+    if answer_ready {
+        return output_from_envelope(
+            exit_code,
+            CliEnvelope {
+                result_text: "(empty response)".into(),
+                session_id: None,
+                total_cost_usd: None,
+                is_error: false,
+            },
+            events,
+        );
     }
     RunOutput {
         exit_code,
@@ -649,13 +659,16 @@ fn ingest_stdout_line(state: &mut StreamParse, line: &str) -> Vec<TurnEvent> {
     match value.get("type").and_then(Value::as_str) {
         Some("assistant") => {
             push_tool_blocks(state, &value, TurnEventKind::ToolUse);
-            // `end_turn` (and any other finished stop) is the answer. `tool_use`
-            // and `pause_turn` mean the CLI is still working, so keep waiting.
-            if let Some(env) = assistant_finished_envelope(&value) {
-                if !state.result_seen {
-                    state.envelope = Some(env);
-                }
+            // `end_turn` (and any other finished stop) marks an answer candidate.
+            // `tool_use` / `pause_turn` keep the CLI working. An empty finished
+            // stop does not fill the envelope — keep reading for a later `result`
+            // or follow-up turn until process exit / stdout EOF.
+            if stop_reason_of(&value).is_some_and(is_finished_stop) {
                 state.answer_ready = true;
+                if let Some(env) = assistant_finished_envelope(&value) {
+                    state.envelope = Some(env);
+                    state.result_seen = false;
+                }
             }
         }
         Some("user") => push_tool_blocks(state, &value, TurnEventKind::ToolResult),
@@ -666,6 +679,7 @@ fn ingest_stdout_line(state: &mut StreamParse, line: &str) -> Vec<TurnEvent> {
                 state.answer_ready = true;
             }
         }
+        Some("system") => push_task_system_event(state, &value),
         _ => {}
     }
     state.events[start..].to_vec()
@@ -695,6 +709,9 @@ fn session_id_of(value: &Value) -> Option<String> {
 }
 
 /// Text of a finished assistant message. Tool blocks stay on the event list.
+/// An empty finished stop with no error is ignored here so a later `result`
+/// line can supply the real answer; `(empty response)` is applied only when
+/// the process ends with no answer text at all.
 fn assistant_finished_envelope(value: &Value) -> Option<CliEnvelope> {
     let reason = stop_reason_of(value)?;
     if !is_finished_stop(reason) {
@@ -709,7 +726,7 @@ fn assistant_finished_envelope(value: &Value) -> Option<CliEnvelope> {
     let (result_text, is_error) = if text.trim().is_empty() {
         match error {
             Some(error) => (error, true),
-            None => ("(empty response)".to_string(), false),
+            None => return None,
         }
     } else {
         (text, false)
@@ -749,6 +766,201 @@ fn assistant_visible_text(message: &Value) -> String {
     parts.join("\n")
 }
 
+fn push_task_system_event(state: &mut StreamParse, value: &Value) {
+    let Some(subtype) = value.get("subtype").and_then(Value::as_str) else {
+        return;
+    };
+    let task_id = json_top_string(value, "task_id");
+    let tool_use_id = json_top_string(value, "tool_use_id");
+    let id = if !task_id.is_empty() {
+        task_id.clone()
+    } else {
+        tool_use_id.clone()
+    };
+    match subtype {
+        "task_started" => {
+            let description = json_top_string(value, "description");
+            let task_type = json_top_string(value, "task_type");
+            let name = if !description.is_empty() {
+                description
+            } else if !task_type.is_empty() {
+                task_type.clone()
+            } else {
+                "background".into()
+            };
+            let mut preview_bits = Vec::new();
+            if value
+                .get("is_backgrounded")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                preview_bits.push("background".to_string());
+            }
+            if !task_type.is_empty() && name != task_type {
+                preview_bits.push(task_type);
+            }
+            state.events.push(TurnEvent {
+                kind: TurnEventKind::TaskStarted,
+                tool_use_id: id,
+                name,
+                is_error: false,
+                preview: cut_preview(&preview_bits.join(" · ")),
+                path: None,
+            });
+        }
+        "task_progress" => {
+            let description = json_top_string(value, "description");
+            let summary = json_top_string(value, "summary");
+            let last_tool = json_top_string(value, "last_tool_name");
+            let name = if description.is_empty() {
+                task_name_for_id(state, &id)
+            } else {
+                description
+            };
+            let preview = if !summary.is_empty() {
+                summary
+            } else if !last_tool.is_empty() {
+                last_tool
+            } else {
+                String::new()
+            };
+            state.events.push(TurnEvent {
+                kind: TurnEventKind::TaskProgress,
+                tool_use_id: id,
+                name,
+                is_error: false,
+                preview: cut_preview(&preview),
+                path: None,
+            });
+        }
+        "task_updated" => {
+            let patch = value.get("patch").and_then(Value::as_object);
+            let status = patch
+                .and_then(|p| p.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let description = patch
+                .and_then(|p| p.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let error = patch
+                .and_then(|p| p.get("error"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let name = if description.is_empty() {
+                task_name_for_id(state, &id)
+            } else {
+                description
+            };
+            let is_error = matches!(status.as_str(), "failed" | "killed");
+            let preview = if !error.is_empty() {
+                error
+            } else {
+                status
+            };
+            state.events.push(TurnEvent {
+                kind: TurnEventKind::TaskUpdated,
+                tool_use_id: id,
+                name,
+                is_error,
+                preview: cut_preview(&preview),
+                path: None,
+            });
+        }
+        "task_notification" => {
+            let status = json_top_string(value, "status");
+            let summary = json_top_string(value, "summary");
+            let output_file = json_top_string(value, "output_file");
+            let name = task_name_for_id(state, &id);
+            let name = if name.is_empty() {
+                if summary.is_empty() {
+                    status.clone()
+                } else {
+                    summary.clone()
+                }
+            } else {
+                name
+            };
+            let is_error = matches!(status.as_str(), "failed" | "stopped");
+            let preview = if !summary.is_empty() {
+                summary
+            } else {
+                status
+            };
+            state.events.push(TurnEvent {
+                kind: TurnEventKind::TaskNotification,
+                tool_use_id: id,
+                name,
+                is_error,
+                preview: cut_preview(&preview),
+                path: clean_stored_path(&output_file),
+            });
+        }
+        "background_tasks_changed" => {
+            let tasks = value
+                .get("tasks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut names = Vec::new();
+            for task in &tasks {
+                let desc = json_top_string(task, "description");
+                if !desc.is_empty() {
+                    names.push(desc);
+                    continue;
+                }
+                let task_type = json_top_string(task, "task_type");
+                if !task_type.is_empty() {
+                    names.push(task_type);
+                }
+            }
+            let count = tasks.len();
+            state.events.push(TurnEvent {
+                kind: TurnEventKind::BackgroundTasksChanged,
+                tool_use_id: String::new(),
+                name: count.to_string(),
+                is_error: false,
+                preview: cut_preview(&names.join("\n")),
+                path: None,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn json_top_string(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn task_name_for_id(state: &StreamParse, task_id: &str) -> String {
+    if task_id.is_empty() {
+        return String::new();
+    }
+    state
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                event.kind,
+                TurnEventKind::TaskStarted
+                    | TurnEventKind::TaskProgress
+                    | TurnEventKind::TaskUpdated
+                    | TurnEventKind::TaskNotification
+            ) && event.tool_use_id == task_id
+                && !event.name.is_empty()
+        })
+        .map(|event| event.name.clone())
+        .unwrap_or_default()
+}
+
 fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind) {
     let Some(blocks) = value
         .get("message")
@@ -760,6 +972,7 @@ fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind)
     let block_type = match kind {
         TurnEventKind::ToolUse => "tool_use",
         TurnEventKind::ToolResult => "tool_result",
+        _ => return,
     };
     for block in blocks {
         let Some(block) = block.as_object() else {
@@ -806,6 +1019,7 @@ fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind)
                     path,
                 });
             }
+            _ => {}
         }
     }
 }
@@ -1863,6 +2077,116 @@ mod tests {
         assert_eq!(out.total_cost_usd, Some(0.25));
     }
 
+    #[test]
+    fn empty_finished_stop_waits_for_result_or_eof_placeholder() {
+        let empty = ndjson(&[json!({
+            "type": "assistant",
+            "session_id": "sess-empty",
+            "message": {
+                "stop_reason": "end_turn",
+                "content": [{"type": "thinking", "thinking": "only"}]
+            }
+        })]);
+        let streamed = parse_stream(&empty);
+        assert!(streamed.answer_ready);
+        assert!(streamed.envelope.is_none());
+        let alone = parse_output(0, empty.clone(), String::new());
+        assert_eq!(alone.result_text, "(empty response)");
+        assert!(alone.parse_ok);
+
+        let with_result = ndjson(&[
+            json!({
+                "type": "assistant",
+                "session_id": "sess-empty",
+                "message": {
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "thinking", "thinking": "only"}]
+                }
+            }),
+            json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "result": "Later text",
+                "session_id": "sess-empty",
+                "total_cost_usd": 0.4
+            }),
+        ]);
+        let out = parse_output(0, with_result, String::new());
+        assert_eq!(out.result_text, "Later text");
+        assert_eq!(out.total_cost_usd, Some(0.4));
+    }
+
+    #[test]
+    fn task_system_lines_become_turn_events() {
+        let stdout = ndjson(&[
+            json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "t1",
+                "description": "compile",
+                "task_type": "local_bash",
+                "is_backgrounded": true
+            }),
+            json!({
+                "type": "system",
+                "subtype": "task_progress",
+                "task_id": "t1",
+                "description": "compile",
+                "summary": "step 2",
+                "usage": {"total_tokens": 1, "tool_uses": 1, "duration_ms": 10}
+            }),
+            json!({
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": "t1",
+                "patch": {"status": "running"}
+            }),
+            json!({
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [{"task_id": "t1", "task_type": "local_bash", "description": "compile"}]
+            }),
+            json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "t1",
+                "status": "completed",
+                "summary": "ok",
+                "output_file": "/tmp/out"
+            }),
+            json!({
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": []
+            }),
+            json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "result": "done",
+                "session_id": "s",
+                "total_cost_usd": 1.0
+            }),
+        ]);
+        let out = parse_output(0, stdout, String::new());
+        assert_eq!(out.result_text, "done");
+        assert!(out.events.iter().any(|e| e.kind == TurnEventKind::TaskStarted));
+        assert!(out.events.iter().any(|e| e.kind == TurnEventKind::TaskProgress));
+        assert!(out.events.iter().any(|e| e.kind == TurnEventKind::TaskUpdated));
+        assert!(out
+            .events
+            .iter()
+            .any(|e| e.kind == TurnEventKind::TaskNotification && !e.is_error));
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|e| e.kind == TurnEventKind::BackgroundTasksChanged)
+                .count(),
+            2
+        );
+    }
+
     #[cfg(unix)]
     fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1914,7 +2238,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn end_turn_ends_the_run_without_waiting_for_exit() {
+    async fn end_turn_waits_for_process_exit_and_keeps_tools() {
         let dir = stub_dir("end-turn");
         let script = write_stub(
             &dir,
@@ -1926,7 +2250,7 @@ cat > "$dir/stdin.txt"
 printf '%s\n' '{"type":"assistant","session_id":"sess-tool","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"calling"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a.txt"}}]}}'
 printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file body"}]}}'
 printf '%s\n' '{"type":"assistant","session_id":"sess-end","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Answer text"}]}}'
-exec sleep 60
+exit 0
 "#,
         );
         let prompt = "say \"hello\" & echo off";
@@ -1960,7 +2284,7 @@ exec sleep 60
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn result_after_end_turn_is_kept_without_waiting_for_exit() {
+    async fn result_after_end_turn_is_kept_until_exit() {
         let dir = stub_dir("result-line");
         let script = write_stub(
             &dir,
@@ -1970,7 +2294,7 @@ dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cat > "$dir/stdin.txt"
 printf '%s\n' '{"type":"assistant","session_id":"sess-end","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Early"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"From result","session_id":"sess-r","total_cost_usd":0.25}'
-exec sleep 60
+exit 0
 "#,
         );
         let started = std::time::Instant::now();
@@ -1989,6 +2313,116 @@ exec sleep 60
             std::fs::read_to_string(dir.join("stdin.txt")).unwrap(),
             "prompt-on-stdin"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn waits_past_first_result_for_follow_up_turn() {
+        let dir = stub_dir("bg-followup");
+        let script = write_stub(
+            &dir,
+            "claude-stub.sh",
+            r#"#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cat > "$dir/stdin.txt"
+printf '%s\n' '{"type":"assistant","session_id":"sess-1","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"I will report when done"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"I will report when done","session_id":"sess-1","total_cost_usd":0.1}'
+printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"task_1","description":"verify suite","task_type":"local_bash","is_backgrounded":true}'
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"task_1","task_type":"local_bash","description":"verify suite"}]}'
+sleep 0.4
+printf '%s\n' '{"type":"system","subtype":"task_notification","task_id":"task_1","status":"completed","summary":"all green","output_file":"/tmp/out.txt"}'
+printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+printf '%s\n' '{"type":"assistant","session_id":"sess-1","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Verification finished"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Verification finished","session_id":"sess-1","total_cost_usd":0.2}'
+exit 0
+"#,
+        );
+        let out = run_stub(&dir, &script, "run checks").await;
+        assert!(out.parse_ok);
+        assert_eq!(out.result_text, "Verification finished");
+        assert_eq!(out.total_cost_usd, Some(0.2));
+        assert!(out
+            .events
+            .iter()
+            .any(|e| e.kind == TurnEventKind::TaskStarted && e.name == "verify suite"));
+        assert!(out
+            .events
+            .iter()
+            .any(|e| e.kind == TurnEventKind::TaskNotification && e.preview.contains("all green")));
+        assert!(out
+            .events
+            .iter()
+            .any(|e| e.kind == TurnEventKind::BackgroundTasksChanged));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_end_turn_prefers_later_result() {
+        let dir = stub_dir("empty-then-result");
+        let script = write_stub(
+            &dir,
+            "claude-stub.sh",
+            r#"#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cat > "$dir/stdin.txt"
+printf '%s\n' '{"type":"assistant","session_id":"sess-e","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"only"}]}}'
+sleep 0.3
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Real answer","session_id":"sess-e","total_cost_usd":0.11}'
+exit 0
+"#,
+        );
+        let out = run_stub(&dir, &script, "prompt").await;
+        assert!(out.parse_ok);
+        assert_eq!(out.result_text, "Real answer");
+        assert!(!out.result_text.contains("empty response"));
+        assert_eq!(out.total_cost_usd, Some(0.11));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hang_timeout_surfaces_error() {
+        let dir = stub_dir("hang-timeout");
+        let script = write_stub(
+            &dir,
+            "claude-stub.sh",
+            r#"#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"assistant","session_id":"sess-h","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"stuck"}]}}'
+exec sleep 60
+"#,
+        );
+        let active = std::sync::Arc::new(ActiveRun::new());
+        let started = std::time::Instant::now();
+        let result = run_claude_managed(
+            RunSpec {
+                binary: &script,
+                prompt: "prompt",
+                cwd: &dir,
+                resume: None,
+                model: None,
+                effort: None,
+                fast_mode: false,
+                allowed_tools_preset: "read",
+                timeout_secs: 1,
+                api_key: Some(""),
+            },
+            active,
+            &|_| {},
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "took {:?}",
+            started.elapsed()
+        );
+        match result {
+            Err(CliError::TimedOut(1)) => {}
+            Ok(_) => panic!("expected TimedOut(1), got Ok"),
+            Err(other) => panic!("expected TimedOut(1), got {other}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

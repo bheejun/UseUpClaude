@@ -23,15 +23,28 @@ type ToolRow = {
   preview: string | null;
   isError: boolean;
   pending: boolean;
+  kind: "tool" | "task";
 };
 
 function nonempty(text: string): string | null {
   return text.trim() ? text : null;
 }
 
+function isTaskKind(kind: TurnEvent["kind"]): boolean {
+  return (
+    kind === "task_started" ||
+    kind === "task_progress" ||
+    kind === "task_updated" ||
+    kind === "task_notification" ||
+    kind === "background_tasks_changed"
+  );
+}
+
 function toolRows(events: TurnEvent[]): ToolRow[] {
   const rows: ToolRow[] = [];
   const byId = new Map<string, number>();
+  const taskById = new Map<string, number>();
+  let backgroundSlot: number | undefined;
   events.forEach((event, index) => {
     if (event.kind === "tool_use") {
       if (event.toolUseId) byId.set(event.toolUseId, rows.length);
@@ -42,27 +55,78 @@ function toolRows(events: TurnEvent[]): ToolRow[] {
         preview: null,
         isError: false,
         pending: true,
+        kind: "tool",
       });
       return;
     }
-    const slot = event.toolUseId ? byId.get(event.toolUseId) : undefined;
-    if (slot != null && rows[slot].pending) {
-      rows[slot] = {
-        ...rows[slot],
-        name: rows[slot].name || event.name,
+    if (event.kind === "tool_result") {
+      const slot = event.toolUseId ? byId.get(event.toolUseId) : undefined;
+      if (slot != null && rows[slot].pending) {
+        rows[slot] = {
+          ...rows[slot],
+          name: rows[slot].name || event.name,
+          preview: nonempty(event.preview),
+          isError: event.isError,
+          pending: false,
+        };
+        return;
+      }
+      rows.push({
+        key: `${event.toolUseId || "result"}-${index}`,
+        name: event.name,
+        inputPreview: null,
         preview: nonempty(event.preview),
         isError: event.isError,
         pending: false,
+        kind: "tool",
+      });
+      return;
+    }
+    if (event.kind === "background_tasks_changed") {
+      const count = Number.parseInt(event.name, 10);
+      const pending = Number.isFinite(count) ? count > 0 : Boolean(nonempty(event.preview));
+      const row: ToolRow = {
+        key: `bg-${index}`,
+        name: event.name,
+        inputPreview: null,
+        preview: nonempty(event.preview),
+        isError: false,
+        pending,
+        kind: "task",
+      };
+      if (backgroundSlot != null) {
+        rows[backgroundSlot] = { ...row, key: rows[backgroundSlot].key };
+      } else {
+        backgroundSlot = rows.length;
+        rows.push(row);
+      }
+      return;
+    }
+    if (!isTaskKind(event.kind)) return;
+    const terminal =
+      event.kind === "task_notification" ||
+      (event.kind === "task_updated" &&
+        (event.isError || /^(completed|failed|killed)$/i.test(event.preview.trim())));
+    const slot = event.toolUseId ? taskById.get(event.toolUseId) : undefined;
+    if (slot != null) {
+      rows[slot] = {
+        ...rows[slot],
+        name: event.name || rows[slot].name,
+        preview: nonempty(event.preview) ?? rows[slot].preview,
+        isError: event.isError || rows[slot].isError,
+        pending: terminal ? false : rows[slot].pending,
       };
       return;
     }
+    if (event.toolUseId) taskById.set(event.toolUseId, rows.length);
     rows.push({
-      key: `${event.toolUseId || "result"}-${index}`,
-      name: event.name,
+      key: `${event.toolUseId || event.kind}-${index}`,
+      name: event.name || event.kind,
       inputPreview: null,
       preview: nonempty(event.preview),
       isError: event.isError,
-      pending: false,
+      pending: !terminal,
+      kind: "task",
     });
   });
   return rows;
@@ -82,6 +146,15 @@ function ToolEvents({ events }: { events: TurnEvent[] }) {
   const grouped = rows.length > 1;
   const anyPending = rows.some((row) => row.pending);
   const anyError = rows.some((row) => row.isError);
+  const taskCount = rows.filter((row) => row.kind === "task").length;
+  const toolCount = rows.length - taskCount;
+  const groupLabel =
+    taskCount > 0 && toolCount > 0
+      ? t("activityGroup", { n: rows.length })
+      : taskCount > 0
+        ? t("taskGroup", { n: taskCount })
+        : t("toolGroup", { n: toolCount });
+  const groupAria = taskCount > 0 && toolCount === 0 ? t("taskEvent") : t("toolEvent");
   const toggle = (key: string) => {
     setOpenKeys((current) => {
       const next = new Set(current);
@@ -90,9 +163,22 @@ function ToolEvents({ events }: { events: TurnEvent[] }) {
       return next;
     });
   };
+  const statusLabel = (row: ToolRow) => {
+    if (row.pending) return row.kind === "task" ? t("taskRunning") : t("toolRunning");
+    if (row.isError) return row.kind === "task" ? t("taskFailed") : t("toolDone");
+    return row.kind === "task" ? t("taskDone") : t("toolDone");
+  };
+  const rowTitle = (row: ToolRow) => {
+    if (row.kind !== "task") return row.name;
+    if (row.key.startsWith("bg-") || /^\d+$/.test(row.name)) {
+      const n = Number.parseInt(row.name, 10);
+      return Number.isFinite(n) ? t("backgroundTasks", { n }) : t("taskEvent");
+    }
+    return row.name;
+  };
 
   return (
-    <div className="mb-2 flex flex-col gap-0.5" role="group" aria-label={t("toolEvent")}>
+    <div className="mb-2 flex flex-col gap-0.5" role="group" aria-label={groupAria}>
       {grouped && (
         <button
           type="button"
@@ -115,14 +201,20 @@ function ToolEvents({ events }: { events: TurnEvent[] }) {
           ) : (
             <Check className={cn("size-3 shrink-0", anyError ? "text-red-100" : "text-muted-foreground")} />
           )}
-          <span className="min-w-0 flex-1 truncate">{t("toolGroup", { n: rows.length })}</span>
+          <span className="min-w-0 flex-1 truncate">{groupLabel}</span>
           <span
             className={cn(
               "shrink-0 text-[10px] uppercase tracking-[0.12em]",
               anyError ? "text-red-100" : "text-muted-foreground",
             )}
           >
-            {anyPending ? t("toolRunning") : t("toolDone")}
+            {anyPending
+              ? taskCount > 0
+                ? t("taskRunning")
+                : t("toolRunning")
+              : taskCount > 0
+                ? t("taskDone")
+                : t("toolDone")}
           </span>
         </button>
       )}
@@ -154,14 +246,14 @@ function ToolEvents({ events }: { events: TurnEvent[] }) {
               ) : (
                 <Check className={cn("size-3 shrink-0", row.isError ? "text-red-100" : "text-muted-foreground")} />
               )}
-              <span className="min-w-0 flex-1 truncate">{row.name}</span>
+              <span className="min-w-0 flex-1 truncate">{rowTitle(row)}</span>
               <span
                 className={cn(
                   "shrink-0 text-[10px] uppercase tracking-[0.12em]",
                   row.isError ? "text-red-100" : "text-muted-foreground",
                 )}
               >
-                {row.pending ? t("toolRunning") : t("toolDone")}
+                {statusLabel(row)}
               </span>
             </button>
             {open && preview ? (

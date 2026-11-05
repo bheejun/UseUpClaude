@@ -48,6 +48,11 @@ pub enum TurnStatus {
 pub enum TurnEventKind {
     ToolUse,
     ToolResult,
+    TaskStarted,
+    TaskProgress,
+    TaskUpdated,
+    TaskNotification,
+    BackgroundTasksChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
