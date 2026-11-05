@@ -8,6 +8,17 @@ export interface TurnEvent {
   name: string;
   isError: boolean;
   preview: string;
+  /** Set when a Write or Edit path would otherwise be missing from the stored event. */
+  path?: string | null;
+}
+
+export type ProjectFileKind = "markdown" | "text" | "unsupported";
+
+export interface ProjectFileView {
+  path: string;
+  kind: ProjectFileKind;
+  content: string | null;
+  truncated: boolean;
 }
 
 export interface AppSettings {

@@ -554,12 +554,17 @@ fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind)
         }
         match kind {
             TurnEventKind::ToolUse => {
+                let name = json_string(block, "name");
+                let input = block.get("input");
+                let path = file_change_path(&name, input);
+                let preview = tool_input_preview(&name, input);
                 state.events.push(TurnEvent {
                     kind,
                     tool_use_id: json_string(block, "id"),
-                    name: json_string(block, "name"),
+                    name,
                     is_error: false,
-                    preview: cut_preview(&json_preview(block.get("input"))),
+                    preview,
+                    path,
                 });
             }
             TurnEventKind::ToolResult => {
@@ -569,12 +574,20 @@ fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind)
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let preview = cut_preview(&content_preview(block.get("content")));
+                // Result text usually has no path. Keep the path from the matching call.
+                let path = if is_file_change_tool(&name) {
+                    path_for_id(state, &tool_use_id)
+                } else {
+                    None
+                };
                 state.events.push(TurnEvent {
                     kind,
                     tool_use_id,
                     name,
                     is_error,
-                    preview: cut_preview(&content_preview(block.get("content"))),
+                    preview,
+                    path,
                 });
             }
         }
@@ -592,6 +605,97 @@ fn tool_name_for_id(state: &StreamParse, tool_use_id: &str) -> String {
         .find(|event| event.kind == TurnEventKind::ToolUse && event.tool_use_id == tool_use_id)
         .map(|event| event.name.clone())
         .unwrap_or_default()
+}
+
+fn path_for_id(state: &StreamParse, tool_use_id: &str) -> Option<String> {
+    if tool_use_id.is_empty() {
+        return None;
+    }
+    state
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == TurnEventKind::ToolUse && event.tool_use_id == tool_use_id)
+        .and_then(|event| event.path.clone())
+}
+
+fn is_file_change_tool(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "write" | "edit" | "multiedit" | "notebookedit"
+    )
+}
+
+fn file_change_path(name: &str, input: Option<&Value>) -> Option<String> {
+    if !is_file_change_tool(name) {
+        return None;
+    }
+    let obj = input?.as_object()?;
+    for key in [
+        "file_path",
+        "filePath",
+        "notebook_path",
+        "notebookPath",
+        "path",
+    ] {
+        if let Some(text) = obj.get(key).and_then(Value::as_str) {
+            return clean_stored_path(text);
+        }
+    }
+    None
+}
+
+fn clean_stored_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|ch| ch.is_control()) {
+        return None;
+    }
+    Some(cut_at(trimmed, 4096))
+}
+
+const FILE_BODY_KEYS: &[&str] = &[
+    "content",
+    "contents",
+    "old_string",
+    "new_string",
+    "old_str",
+    "new_str",
+    "old_source",
+    "new_source",
+];
+
+/// Drop Write/Edit bodies before the preview cap. The path stays on the event.
+fn redact_file_bodies(value: &Value) -> Value {
+    let Value::Object(map) = value else {
+        return value.clone();
+    };
+    let mut next = serde_json::Map::new();
+    for (key, item) in map {
+        if FILE_BODY_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        if key == "edits" {
+            if let Some(items) = item.as_array() {
+                next.insert(
+                    key.clone(),
+                    Value::Array(items.iter().map(redact_file_bodies).collect()),
+                );
+                continue;
+            }
+        }
+        next.insert(key.clone(), item.clone());
+    }
+    Value::Object(next)
+}
+
+fn tool_input_preview(name: &str, input: Option<&Value>) -> String {
+    if is_file_change_tool(name) {
+        if let Some(value) = input {
+            let redacted = redact_file_bodies(value);
+            return cut_preview(&json_preview(Some(&redacted)));
+        }
+    }
+    cut_preview(&json_preview(input))
 }
 
 fn json_string(obj: &serde_json::Map<String, Value>, key: &str) -> String {
@@ -636,10 +740,14 @@ fn content_preview(value: Option<&Value>) -> String {
 }
 
 fn cut_preview(text: &str) -> String {
-    if text.len() <= PREVIEW_MAX_BYTES {
+    cut_at(text, PREVIEW_MAX_BYTES)
+}
+
+fn cut_at(text: &str, max: usize) -> String {
+    if text.len() <= max {
         return text.to_string();
     }
-    let mut end = PREVIEW_MAX_BYTES;
+    let mut end = max;
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -1192,6 +1300,7 @@ mod tests {
         assert_eq!(out.events[0].name, "Read");
         assert!(!out.events[0].is_error);
         assert_eq!(out.events[0].preview, r#"{"path":"a.txt"}"#);
+        assert!(out.events[0].path.is_none());
         assert_eq!(out.events[1].kind, TurnEventKind::ToolResult);
         assert_eq!(out.events[1].tool_use_id, "toolu_1");
         assert_eq!(out.events[1].name, "Read");
@@ -1204,6 +1313,7 @@ mod tests {
         assert_eq!(wire[0]["toolUseId"], "toolu_1");
         assert_eq!(wire[0]["name"], "Read");
         assert_eq!(wire[0]["isError"], false);
+        assert!(wire[0].get("path").is_none());
         assert_eq!(wire[1]["kind"], "tool_result");
         assert_eq!(wire[1]["toolUseId"], "toolu_1");
         assert_eq!(wire[1]["isError"], true);
@@ -1251,6 +1361,115 @@ mod tests {
         assert_eq!(failed.events[0].kind, TurnEventKind::ToolUse);
         assert_eq!(failed.events[0].name, "Bash");
         assert_eq!(failed.events[0].tool_use_id, "toolu_2");
+        assert!(failed.events[0].path.is_none());
+    }
+
+    #[test]
+    fn write_and_edit_keep_path_and_drop_file_bodies() {
+        let body = format!("BODY{}", "z".repeat(20_000));
+        let old_string = format!("OLD{}", "a".repeat(9_000));
+        let new_string = format!("NEW{}", "b".repeat(9_000));
+        let echoed = format!("ECHO{}", "q".repeat(9_000));
+        let stdout = ndjson(&[
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_w",
+                        "name": "Write",
+                        "input": {
+                            "content": body,
+                            "file_path": "notes/out.md"
+                        }
+                    }]
+                }
+            }),
+            json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_w",
+                        "content": echoed
+                    }]
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_e",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": "src/main.rs",
+                            "old_string": old_string,
+                            "new_string": new_string,
+                            "replace_all": false
+                        }
+                    }]
+                }
+            }),
+            json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_e",
+                        "is_error": true,
+                        "content": "edit failed"
+                    }]
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_m",
+                        "name": "MultiEdit",
+                        "input": {
+                            "file_path": "src/lib.rs",
+                            "edits": [{
+                                "old_string": "alpha",
+                                "new_string": "beta"
+                            }]
+                        }
+                    }]
+                }
+            }),
+        ]);
+        let out = parse_output(0, stdout, String::new());
+        assert_eq!(out.events.len(), 5);
+        assert_eq!(out.events[0].name, "Write");
+        assert_eq!(out.events[0].path.as_deref(), Some("notes/out.md"));
+        assert_eq!(out.events[0].preview, r#"{"file_path":"notes/out.md"}"#);
+        assert!(!out.events[0].preview.contains("BODY"));
+        assert!(out.events[0].preview.len() <= 8192);
+        assert_eq!(out.events[1].kind, TurnEventKind::ToolResult);
+        assert_eq!(out.events[1].path.as_deref(), Some("notes/out.md"));
+        assert!(out.events[1].preview.len() <= 8192);
+        assert!(out.events[1].preview.len() < echoed.len());
+        assert!(!out.events[1].preview.contains(&"q".repeat(9_000)));
+        assert_eq!(out.events[2].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(
+            out.events[2].preview,
+            r#"{"file_path":"src/main.rs","replace_all":false}"#
+        );
+        assert!(!out.events[2].preview.contains("OLD"));
+        assert!(!out.events[2].preview.contains("NEW"));
+        assert_eq!(out.events[3].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(out.events[3].preview, "edit failed");
+        assert_eq!(out.events[4].path.as_deref(), Some("src/lib.rs"));
+        assert!(!out.events[4].preview.contains("alpha"));
+        assert!(!out.events[4].preview.contains("beta"));
+        let stored = serde_json::to_string(&out.events).unwrap();
+        assert!(!stored.contains("BODY"));
+        assert!(!stored.contains("OLD"));
+        assert!(!stored.contains("NEW"));
+        assert!(stored.contains("notes/out.md"));
+        assert!(stored.len() < 20_000);
     }
 
     fn ndjson(lines: &[Value]) -> String {

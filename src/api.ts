@@ -6,6 +6,7 @@ import type {
   DiscoveredProject,
   GuiSession,
   KeyStatus,
+  ProjectFileView,
   ModelCatalog,
   ProjectSkill,
   SendMessageResponse,
@@ -32,6 +33,8 @@ export const api = {
   detectClaude: () => invoke<ClaudeDetectResult>("detect_claude"),
   listSessions: () => invoke<SessionSummary[]>("list_sessions"),
   getSession: (id: string) => invoke<GuiSession>("get_session", { id }),
+  readProjectFile: (sessionId: string, path: string) =>
+    invoke<ProjectFileView>("read_project_file", { sessionId, path }),
   deleteSession: (id: string) => invoke<void>("delete_session", { id }),
   createSession: (args: {
     cwd: string;

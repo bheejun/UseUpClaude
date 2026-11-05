@@ -58,6 +58,28 @@ pub struct TurnEvent {
     pub name: String,
     pub is_error: bool,
     pub preview: String,
+    /// Path a Write or Edit touched. Absent for other tools and for older sessions.
+    /// File bodies stay out of the session file; the panel reads them from the project folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectFileKind {
+    Markdown,
+    Text,
+    Unsupported,
+}
+
+/// Live read of a project file. This is not stored on the session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileView {
+    pub path: String,
+    pub kind: ProjectFileKind,
+    pub content: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
