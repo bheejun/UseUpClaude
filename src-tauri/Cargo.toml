@@ -1,6 +1,6 @@
 [package]
 name = "claude-gui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Desktop GUI wrapper for Claude Code CLI (-p)"
 authors = ["UseUpClaude"]
 edition = "2021"
