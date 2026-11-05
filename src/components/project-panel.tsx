@@ -1,19 +1,36 @@
+import { listen } from "@tauri-apps/api/event";
 import { Kanban, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "@/api";
+import { LibraryView } from "@/components/library-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
-import type { BoardCard, BoardStatus, LibraryDoc, ProjectWorkspace } from "@/types";
+import { folderKey } from "@/produced-files";
+import type { BoardCard, BoardStatus, ProjectWorkspace } from "@/types";
 
-const EMPTY: ProjectWorkspace = { cards: [], docs: [] };
+const EMPTY: ProjectWorkspace = { cards: [] };
 
-export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => void }) {
+export function ProjectPanel({
+  sessionId,
+  cwd,
+  section,
+  onSection,
+  activePath,
+  onActivePath,
+  onClose,
+}: {
+  sessionId: string;
+  cwd: string;
+  section: "board" | "library";
+  onSection: (section: "board" | "library") => void;
+  activePath: string | null;
+  onActivePath: (path: string | null) => void;
+  onClose: () => void;
+}) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<"board" | "library">("board");
   const [workspace, setWorkspace] = useState<ProjectWorkspace>(EMPTY);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
@@ -21,10 +38,34 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
   const [saveFailed, setSaveFailed] = useState(false);
   const [title, setTitle] = useState("");
   const [tag, setTag] = useState("");
-  const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const saveSeq = useRef(0);
   const saveChain = useRef(Promise.resolve());
-  const docTimer = useRef<number | null>(null);
+  const reloadQueued = useRef(false);
+  const [width, setWidth] = useState(672);
+  const widthRef = useRef(width);
+  widthRef.current = width;
+
+  const apply = (next: ProjectWorkspace) => {
+    workspaceRef.current = next;
+    setWorkspace(next);
+  };
+
+  const reload = () => {
+    const seq = saveSeq.current;
+    void api
+      .getProjectWorkspace(cwd)
+      .then((next) => {
+        if (saveSeq.current !== seq) {
+          reloadQueued.current = true;
+          return;
+        }
+        apply(next);
+        setSaveFailed(false);
+      })
+      .catch(() => setSaveFailed(true));
+  };
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
 
   const save = (next: ProjectWorkspace) => {
     const seq = ++saveSeq.current;
@@ -33,10 +74,12 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
       .then(async () => {
         try {
           const saved = await api.saveProjectWorkspace(cwd, next);
-          if (saveSeq.current === seq) {
-            workspaceRef.current = saved;
-            setWorkspace(saved);
-            setSaveFailed(false);
+          if (saveSeq.current !== seq) return;
+          apply(saved);
+          setSaveFailed(false);
+          if (reloadQueued.current) {
+            reloadQueued.current = false;
+            reloadRef.current();
           }
         } catch {
           if (saveSeq.current === seq) setSaveFailed(true);
@@ -45,8 +88,7 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
   };
 
   const commit = (next: ProjectWorkspace) => {
-    workspaceRef.current = next;
-    setWorkspace(next);
+    apply(next);
     save(next);
   };
 
@@ -54,14 +96,11 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
     let cancelled = false;
     setLoading(true);
     setSaveFailed(false);
-    setSelectedDoc(null);
     void api
       .getProjectWorkspace(cwd)
       .then((next) => {
         if (cancelled) return;
-        workspaceRef.current = next;
-        setWorkspace(next);
-        setSelectedDoc(next.docs[0]?.id ?? null);
+        apply(next);
       })
       .catch(() => {
         if (!cancelled) setSaveFailed(true);
@@ -71,7 +110,23 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
       });
     return () => {
       cancelled = true;
-      if (docTimer.current) window.clearTimeout(docTimer.current);
+    };
+  }, [cwd]);
+
+  useEffect(() => {
+    const key = folderKey(cwd);
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<{ cwd: string }>("project-workspace", (event) => {
+      if (folderKey(event.payload.cwd) !== key) return;
+      reloadRef.current();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, [cwd]);
 
@@ -84,68 +139,72 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
       title: nextTitle,
       tag: tag.trim(),
       status: "progress",
+      failed: false,
     };
-    commit({ ...workspaceRef.current, cards: [card, ...workspaceRef.current.cards] });
+    commit({ cards: [card, ...workspaceRef.current.cards] });
     setTitle("");
     setTag("");
   };
 
   const moveCard = (id: string, status: BoardStatus) => {
     commit({
-      ...workspaceRef.current,
-      cards: workspaceRef.current.cards.map((card) => (card.id === id ? { ...card, status } : card)),
+      cards: workspaceRef.current.cards.map((card) =>
+        card.id === id ? { ...card, status, failed: status === "done" ? false : card.failed } : card,
+      ),
     });
   };
 
   const deleteCard = (id: string) => {
-    commit({
-      ...workspaceRef.current,
-      cards: workspaceRef.current.cards.filter((card) => card.id !== id),
-    });
+    commit({ cards: workspaceRef.current.cards.filter((card) => card.id !== id) });
   };
 
-  const createDoc = () => {
-    const doc: LibraryDoc = {
-      id: crypto.randomUUID(),
-      title: t("untitledDocument"),
-      body: "",
+  const clampWidth = (next: number) => {
+    const max = Math.max(420, Math.round(window.innerWidth * 0.72));
+    return Math.min(max, Math.max(420, next));
+  };
+
+  const onResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth < 821) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startW = widthRef.current;
+    const move = (ev: PointerEvent) => {
+      setWidth(clampWidth(startW - (ev.clientX - startX)));
     };
-    setSelectedDoc(doc.id);
-    commit({ ...workspaceRef.current, docs: [doc, ...workspaceRef.current.docs] });
-  };
-
-  const editDoc = (id: string, patch: Partial<Pick<LibraryDoc, "title" | "body">>) => {
-    const next = {
-      ...workspaceRef.current,
-      docs: workspaceRef.current.docs.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)),
+    const up = (ev: PointerEvent) => {
+      if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
     };
-    workspaceRef.current = next;
-    setWorkspace(next);
-    if (docTimer.current) window.clearTimeout(docTimer.current);
-    docTimer.current = window.setTimeout(() => save(next), 350);
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
   };
-
-  const deleteDoc = (id: string) => {
-    if (docTimer.current) window.clearTimeout(docTimer.current);
-    const next = {
-      ...workspaceRef.current,
-      docs: workspaceRef.current.docs.filter((doc) => doc.id !== id),
-    };
-    if (selectedDoc === id) setSelectedDoc(next.docs[0]?.id ?? null);
-    commit(next);
-  };
-
-  const selected = workspace.docs.find((doc) => doc.id === selectedDoc) ?? null;
 
   return (
     <aside
       className="project-panel absolute inset-y-0 right-0 z-30 flex shrink-0 flex-col border-l border-border bg-[#101318] shadow-xl min-[821px]:relative min-[821px]:inset-auto min-[821px]:z-auto min-[821px]:shadow-none"
+      style={{ "--project-panel-width": `${width}px` } as CSSProperties}
       aria-label={t("projectBoard")}
     >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t("resizeFilePanel")}
+        aria-valuenow={width}
+        tabIndex={0}
+        className="absolute inset-y-0 left-0 z-10 hidden w-1.5 -translate-x-1/2 cursor-col-resize min-[821px]:block hover:bg-primary/50"
+        onPointerDown={onResizePointerDown}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") setWidth((current) => clampWidth(current + 24));
+          if (event.key === "ArrowRight") setWidth((current) => clampWidth(current - 24));
+        }}
+      />
       <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
         <h3 className="flex min-w-0 items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
           <Kanban className="size-3.5 shrink-0" />
-          <span className="truncate">{t("projectBoard")}</span>
+          <span className="truncate">{section === "board" ? t("projectBoard") : t("projectLibrary")}</span>
         </h3>
         <button
           type="button"
@@ -168,26 +227,26 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
             type="button"
             role="tab"
             id={`project-tab-${id}`}
-            aria-selected={tab === id}
+            aria-selected={section === id}
             aria-controls={`project-panel-${id}`}
             className={cn(
               "border-b-2 px-3 py-2 text-[13px]",
-              tab === id
+              section === id
                 ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground",
             )}
-            onClick={() => setTab(id)}
+            onClick={() => onSection(id)}
           >
             {label}
           </button>
         ))}
       </div>
-      {saveFailed && (
+      {saveFailed && section === "board" && (
         <p className="border-b border-border px-3 py-2 text-[12px] text-destructive" role="alert">
           {t("workspaceSaveFailed")}
         </p>
       )}
-      {tab === "board" ? (
+      {section === "board" ? (
         <div
           role="tabpanel"
           id="project-panel-board"
@@ -239,50 +298,7 @@ export function ProjectPanel({ cwd, onClose }: { cwd: string; onClose: () => voi
           aria-labelledby="project-tab-library"
           className="flex min-h-0 flex-1 flex-col"
         >
-          <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
-            <Button type="button" size="sm" onClick={createDoc}>
-              {t("newDocument")}
-            </Button>
-          </div>
-          {workspace.docs.length === 0 ? (
-            <p className="px-3 py-3 text-[13px] leading-relaxed text-muted-foreground">{t("libraryEmpty")}</p>
-          ) : (
-            <ul className="max-h-36 shrink-0 overflow-y-auto border-b border-border py-1">
-              {workspace.docs.map((doc) => (
-                <li key={doc.id}>
-                  <button
-                    type="button"
-                    className={cn(
-                      "block w-full truncate px-3 py-1.5 text-left text-[13px] hover:bg-accent",
-                      doc.id === selected?.id && "bg-accent text-primary",
-                    )}
-                    aria-current={doc.id === selected?.id ? "true" : undefined}
-                    onClick={() => setSelectedDoc(doc.id)}
-                  >
-                    {doc.title.trim() || t("untitledDocument")}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {selected && (
-            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2">
-              <Input
-                value={selected.title}
-                aria-label={t("documentTitle")}
-                onChange={(event) => editDoc(selected.id, { title: event.target.value })}
-              />
-              <Textarea
-                value={selected.body}
-                aria-label={t("documentBody")}
-                className="min-h-48 flex-1 resize-none font-mono text-[12px]"
-                onChange={(event) => editDoc(selected.id, { body: event.target.value })}
-              />
-              <Button type="button" variant="outline" size="sm" onClick={() => deleteDoc(selected.id)}>
-                {t("deleteDocument")}
-              </Button>
-            </div>
-          )}
+          <LibraryView sessionId={sessionId} cwd={cwd} openedPath={activePath} onActivePath={onActivePath} />
         </div>
       )}
     </aside>
@@ -344,9 +360,12 @@ function BoardColumn({
               <span className="shrink-0 font-mono text-[10px] text-muted-foreground">#{card.number || "–"}</span>
               <p className="min-w-0 flex-1 text-[13px] leading-snug">{card.title}</p>
             </div>
-            {card.tag && (
-              <Badge className="mt-1 max-w-full truncate normal-case tracking-normal">{card.tag}</Badge>
-            )}
+            <div className="mt-1 flex flex-wrap gap-1">
+              {card.failed && (
+                <Badge className="border-destructive/40 text-destructive normal-case tracking-normal">{t("cardFailed")}</Badge>
+              )}
+              {card.tag && <Badge className="max-w-full truncate normal-case tracking-normal">{card.tag}</Badge>}
+            </div>
             <div className="mt-1.5 flex gap-1">
               <button
                 type="button"

@@ -1,4 +1,7 @@
-use crate::models::{ProjectDirEntry, ProjectDirListing, ProjectFileKind, ProjectFileView};
+use crate::models::{
+    ProjectDirEntry, ProjectDirListing, ProjectFileIndex, ProjectFileKind, ProjectFileRef,
+    ProjectFileView, RecentProjectFile,
+};
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
@@ -8,6 +11,23 @@ const PANEL_MAX_BYTES: usize = 512 * 1024;
 
 /// Children returned for one folder. The rest stay on disk until the next listing.
 const DIR_LIST_LIMIT: usize = 400;
+
+/// Files walked for recents and the open-file picker.
+const INDEX_FILE_LIMIT: usize = 4000;
+const INDEX_DIR_LIMIT: usize = 500;
+const RECENT_LIMIT: usize = 12;
+const PREVIEW_CHARS: usize = 700;
+
+/// Dependency trees stay on disk. All Files still lists them one folder at a time.
+const SKIP_WALK: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    "vendor",
+    "__pycache__",
+];
 
 const MARKDOWN_EXT: &[&str] = &["md", "markdown", "mdx", "mdown"];
 
@@ -109,6 +129,7 @@ pub(crate) fn list_in_project(cwd: &Path, raw_path: &str) -> Result<ProjectDirLi
             name,
             path,
             is_dir: real.is_dir(),
+            modified_ms: modified_ms(&real),
         });
     }
     entries.sort_by(|left, right| {
@@ -124,6 +145,141 @@ pub(crate) fn list_in_project(cwd: &Path, raw_path: &str) -> Result<ProjectDirLi
         entries,
         truncated,
     })
+}
+
+/// Every file under the project, except dependency directories. No file bodies.
+pub(crate) fn index_in_project(cwd: &Path) -> Result<ProjectFileIndex, String> {
+    let root = cwd
+        .canonicalize()
+        .map_err(|_| "project folder is missing".to_string())?;
+    let mut files = Vec::new();
+    let mut truncated = false;
+    let mut dirs_left = INDEX_DIR_LIMIT;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        if dirs_left == 0 || files.len() >= INDEX_FILE_LIMIT {
+            truncated = true;
+            break;
+        }
+        dirs_left -= 1;
+        let Ok(reader) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in reader {
+            let Ok(item) = item else {
+                continue;
+            };
+            let Some(name) = item.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains(['/', '\\'])
+                || name.chars().any(|ch| ch.is_control())
+            {
+                continue;
+            }
+            let Ok(real) = item.path().canonicalize() else {
+                continue;
+            };
+            if !starts_inside(&real, &root) {
+                continue;
+            }
+            let Ok(path) = relative_to(&root, &real) else {
+                continue;
+            };
+            if real.is_dir() {
+                if SKIP_WALK.iter().any(|skip| *skip == name) {
+                    continue;
+                }
+                stack.push(real);
+            } else if real.is_file() {
+                if files.len() >= INDEX_FILE_LIMIT {
+                    truncated = true;
+                    continue;
+                }
+                files.push(ProjectFileRef {
+                    name,
+                    path,
+                    modified_ms: modified_ms(&real),
+                });
+            }
+        }
+    }
+    files.sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+    Ok(ProjectFileIndex { files, truncated })
+}
+
+/// Newest files in the project folder, with a short snippet for the recent cards.
+/// Snippets are not stored on the session.
+pub(crate) fn recent_in_project(cwd: &Path) -> Result<Vec<RecentProjectFile>, String> {
+    let mut files = index_in_project(cwd)?.files;
+    files.sort_by(|left, right| {
+        right
+            .modified_ms
+            .cmp(&left.modified_ms)
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+    files.truncate(RECENT_LIMIT);
+    let mut recent = Vec::with_capacity(files.len());
+    for file in files {
+        let (kind, preview) = match resolve_inside(cwd, &file.path) {
+            Ok(path) => read_preview(&path),
+            Err(_) => (ProjectFileKind::Unsupported, String::new()),
+        };
+        recent.push(RecentProjectFile {
+            name: file.name,
+            path: file.path,
+            modified_ms: file.modified_ms,
+            kind,
+            preview,
+        });
+    }
+    Ok(recent)
+}
+
+fn modified_ms(path: &Path) -> u64 {
+    let Ok(meta) = path.metadata() else {
+        return 0;
+    };
+    let Ok(modified) = meta.modified() else {
+        return 0;
+    };
+    let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return 0;
+    };
+    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn read_preview(path: &Path) -> (ProjectFileKind, String) {
+    if is_binary_extension(path) {
+        return (ProjectFileKind::Unsupported, String::new());
+    }
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (ProjectFileKind::Unsupported, String::new()),
+    };
+    let mut buf = vec![0_u8; 4096];
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return (ProjectFileKind::Unsupported, String::new()),
+        }
+    }
+    buf.truncate(filled);
+    let Some(text) = utf8_text(&buf) else {
+        return (ProjectFileKind::Unsupported, String::new());
+    };
+    let kind = if is_markdown_extension(path) {
+        ProjectFileKind::Markdown
+    } else {
+        ProjectFileKind::Text
+    };
+    (kind, text.chars().take(PREVIEW_CHARS).collect())
 }
 
 fn relative_to(root: &Path, path: &Path) -> Result<String, String> {
@@ -457,6 +613,7 @@ mod tests {
             .find(|entry| entry.name == "README.md")
             .unwrap();
         assert_eq!(readme.path, "README.md");
+        assert!(readme.modified_ms > 0);
         assert_eq!(
             read_in_project(&root, &readme.path).unwrap().content.as_deref(),
             Some("hi")
@@ -491,6 +648,40 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
         let _ = fs::remove_dir_all(&many);
+    }
+
+    #[test]
+    fn recents_read_the_project_folder_and_skip_dependency_trees() {
+        let root = scratch();
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(root.join("docs").join("notes.md"), "# Hello\n\nbody").unwrap();
+        fs::write(root.join("plain.txt"), "just text").unwrap();
+        fs::write(root.join("pic.png"), [0_u8, 1, 2, 3]).unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::write(root.join("node_modules").join("pkg.js"), "ignore").unwrap();
+
+        let recent = recent_in_project(&root).unwrap();
+        let notes = recent.iter().find(|file| file.path == "docs/notes.md").unwrap();
+        assert_eq!(notes.kind, ProjectFileKind::Markdown);
+        assert!(notes.preview.contains("# Hello"));
+        assert!(notes.modified_ms > 0);
+        let plain = recent.iter().find(|file| file.path == "plain.txt").unwrap();
+        assert_eq!(plain.kind, ProjectFileKind::Text);
+        assert!(plain.preview.contains("just text"));
+        let image = recent.iter().find(|file| file.name == "pic.png").unwrap();
+        assert_eq!(image.kind, ProjectFileKind::Unsupported);
+        assert!(image.preview.is_empty());
+        assert!(recent.iter().all(|file| file.name != "pkg.js"));
+
+        let index = index_in_project(&root).unwrap();
+        assert!(index
+            .files
+            .iter()
+            .all(|file| !file.path.contains("node_modules")));
+        assert!(!index.truncated);
+        assert!(index.files.iter().any(|file| file.path == "docs/notes.md"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
@@ -553,6 +744,10 @@ mod tests {
             .iter()
             .all(|entry| entry.name != "leak.txt" && entry.name != "leak-dir"));
         assert!(list_in_project(&root, "leak-dir").is_err());
+        let indexed = index_in_project(&root).unwrap();
+        assert!(indexed.files.iter().all(|file| file.name != "secret.txt"));
+        let recent = recent_in_project(&root).unwrap();
+        assert!(recent.iter().all(|file| !file.preview.contains("nope")));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
     }

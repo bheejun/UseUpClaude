@@ -89,6 +89,38 @@ pub struct ProjectDirEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
+    /// Unix milliseconds. Zero when the filesystem does not report a time.
+    pub modified_ms: u64,
+}
+
+/// A project file named for the picker. No body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileRef {
+    pub name: String,
+    pub path: String,
+    pub modified_ms: u64,
+}
+
+/// Files under the session folder, skipping heavy dependency directories.
+/// This is not stored on the session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileIndex {
+    pub files: Vec<ProjectFileRef>,
+    pub truncated: bool,
+}
+
+/// A recent project file plus a short display snippet.
+/// The snippet is for the panel only and is never written to the session file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentProjectFile {
+    pub name: String,
+    pub path: String,
+    pub modified_ms: u64,
+    pub kind: ProjectFileKind,
+    pub preview: String,
 }
 
 /// One level of the session project folder. This is not stored on the session.
@@ -295,19 +327,17 @@ pub struct BoardCard {
     pub title: String,
     pub tag: String,
     pub status: BoardStatus,
+    /// The turn failed. The card stays in the in-progress column.
+    #[serde(default)]
+    pub failed: bool,
+    /// Chat turn this card tracks. Manual cards leave this empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct LibraryDoc {
-    pub id: Uuid,
-    pub title: String,
-    pub body: String,
-}
-
+/// Board for one project folder. Library files live in that folder, not here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectWorkspace {
     pub cards: Vec<BoardCard>,
-    pub docs: Vec<LibraryDoc>,
 }

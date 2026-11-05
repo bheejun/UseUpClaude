@@ -7,7 +7,6 @@ import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
-import { FilePanel } from "@/components/file-panel";
 import { ProjectPanel } from "@/components/project-panel";
 import { producedFilePaths, sameProjectFile } from "@/produced-files";
 import { DiscoverDialog } from "@/components/discover-dialog";
@@ -408,22 +407,32 @@ export default function App() {
   const [dismissedFiles, setDismissedFiles] = useState<string | null>(null);
   const [treeOpenFor, setTreeOpenFor] = useState<string | null>(null);
   const [projectOpen, setProjectOpen] = useState(false);
+  const [projectSection, setProjectSection] = useState<"board" | "library">("library");
   const [openedFile, setOpenedFile] = useState<{ sessionId: string; path: string } | null>(null);
   const openedPath = active && openedFile?.sessionId === active.id ? openedFile.path : null;
   const filesOpen =
     openedPath != null ||
     (active != null && treeOpenFor === active.id) ||
     (producedPaths.length > 0 && dismissedFiles !== fileSignature);
+  const panelOpen = projectOpen || filesOpen;
+  const libraryShown = panelOpen && projectSection === "library";
+  const boardShown = panelOpen && projectSection === "board";
   const closeFilePanel = () => {
     setOpenedFile(null);
     setDismissedFiles(fileSignature);
     setTreeOpenFor(null);
+  };
+  const closeProject = () => {
+    setProjectOpen(false);
+    closeFilePanel();
   };
   const openProjectFile = useCallback(
     (path: string) => {
       if (!active) return;
       const match = producedPaths.find((item) => sameProjectFile(item, path, active.cwd)) ?? path;
       setDismissedFiles(null);
+      setTreeOpenFor(active.id);
+      setProjectSection("library");
       setOpenedFile({ sessionId: active.id, path: match });
     },
     [active, producedPaths],
@@ -439,6 +448,14 @@ export default function App() {
     },
     [active, producedPaths],
   );
+
+  const libraryFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!active || producedPaths.length === 0 || dismissedFiles === fileSignature) return;
+    if (libraryFor.current === fileSignature) return;
+    libraryFor.current = fileSignature;
+    setProjectSection("library");
+  }, [active, producedPaths.length, dismissedFiles, fileSignature]);
 
   useEffect(() => {
     if (!active || sessionBusy || !active.fastMode || supportsFastMode(active.model)) return;
@@ -640,30 +657,38 @@ export default function App() {
                 {active && (
                   <Button
                     type="button"
-                    variant={filesOpen ? "secondary" : "outline"}
+                    variant={libraryShown ? "secondary" : "outline"}
                     size="sm"
-                    aria-pressed={filesOpen}
-                    aria-label={filesOpen ? t("closeFilePanel") : t("showProjectFolder")}
+                    aria-pressed={libraryShown}
+                    aria-label={libraryShown ? t("closeFilePanel") : t("showProjectFolder")}
                     onClick={() => {
-                      if (filesOpen) closeFilePanel();
+                      if (libraryShown) closeProject();
                       else {
+                        setProjectOpen(true);
+                        setProjectSection("library");
                         setTreeOpenFor(active.id);
                         setDismissedFiles(null);
                       }
                     }}
                   >
                     <Folder className="size-3.5" />
-                    {t("projectFolder")}
+                    {t("projectLibrary")}
                   </Button>
                 )}
                 {active && (
                   <Button
                     type="button"
-                    variant={projectOpen ? "secondary" : "outline"}
+                    variant={boardShown ? "secondary" : "outline"}
                     size="sm"
-                    aria-pressed={projectOpen}
-                    aria-label={projectOpen ? t("closeProjectBoard") : t("openProjectBoard")}
-                    onClick={() => setProjectOpen((open) => !open)}
+                    aria-pressed={boardShown}
+                    aria-label={boardShown ? t("closeProjectBoard") : t("openProjectBoard")}
+                    onClick={() => {
+                      if (boardShown) closeProject();
+                      else {
+                        setProjectOpen(true);
+                        setProjectSection("board");
+                      }
+                    }}
                   >
                     <Kanban className="size-3.5" />
                     {t("projectBoard")}
@@ -904,18 +929,17 @@ export default function App() {
               </p>
             </form>
             </div>
-            {filesOpen && active && (
-              <FilePanel
-                key={active.id}
+            {panelOpen && active && (
+              <ProjectPanel
+                key={active.cwd}
                 sessionId={active.id}
                 cwd={active.cwd}
+                section={projectSection}
+                onSection={setProjectSection}
                 activePath={openedPath}
                 onActivePath={choosePanelPath}
-                onClose={closeFilePanel}
+                onClose={closeProject}
               />
-            )}
-            {projectOpen && active && (
-              <ProjectPanel key={active.cwd} cwd={active.cwd} onClose={() => setProjectOpen(false)} />
             )}
             </div>
           </>

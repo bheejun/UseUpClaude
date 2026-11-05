@@ -25,6 +25,26 @@ export interface ProjectDirEntry {
   name: string;
   path: string;
   isDir: boolean;
+  modifiedMs: number;
+}
+
+export interface ProjectFileRef {
+  name: string;
+  path: string;
+  modifiedMs: number;
+}
+
+export interface ProjectFileIndex {
+  files: ProjectFileRef[];
+  truncated: boolean;
+}
+
+export interface RecentProjectFile {
+  name: string;
+  path: string;
+  modifiedMs: number;
+  kind: ProjectFileKind;
+  preview: string;
 }
 
 export interface ProjectDirListing {
@@ -41,17 +61,12 @@ export interface BoardCard {
   title: string;
   tag: string;
   status: BoardStatus;
-}
-
-export interface LibraryDoc {
-  id: string;
-  title: string;
-  body: string;
+  failed?: boolean;
+  turnId?: string | null;
 }
 
 export interface ProjectWorkspace {
   cards: BoardCard[];
-  docs: LibraryDoc[];
 }
 
 export interface AppSettings {

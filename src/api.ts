@@ -7,8 +7,10 @@ import type {
   GuiSession,
   KeyStatus,
   ProjectDirListing,
+  ProjectFileIndex,
   ProjectFileView,
   ProjectWorkspace,
+  RecentProjectFile,
   ModelCatalog,
   ProjectSkill,
   SendMessageResponse,
@@ -41,6 +43,10 @@ export const api = {
     invoke<void>("write_project_file", { sessionId, path, content }),
   listProjectDir: (sessionId: string, path: string) =>
     invoke<ProjectDirListing>("list_project_dir", { sessionId, path }),
+  recentProjectFiles: (sessionId: string) =>
+    invoke<RecentProjectFile[]>("recent_project_files", { sessionId }),
+  listProjectFiles: (sessionId: string) =>
+    invoke<ProjectFileIndex>("list_project_files", { sessionId }),
   locateProjectFiles: (sessionId: string, paths: string[]) =>
     invoke<string[]>("locate_project_files", { sessionId, paths }),
   getProjectWorkspace: (cwd: string) => invoke<ProjectWorkspace>("get_project_workspace", { cwd }),

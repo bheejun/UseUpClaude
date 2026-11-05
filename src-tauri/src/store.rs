@@ -1,5 +1,5 @@
 use crate::models::{
-    AppSettings, BoardCard, BoardStatus, GuiSession, LibraryDoc, ProjectWorkspace, SessionSummary,
+    AppSettings, BoardCard, BoardStatus, GuiSession, ProjectWorkspace, SessionSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -155,7 +155,8 @@ impl AppStore {
         self.root.join("workspaces").join(format!("{id}.json"))
     }
 
-    /// Board and library for one project folder. Missing folders start empty.
+    /// Board for one project folder. Library files are the folder itself.
+    /// A leftover document list from older builds is deleted on load.
     pub fn load_workspace(&self, cwd: &str) -> Result<ProjectWorkspace, StoreError> {
         let key = workspace_key(cwd).ok_or_else(|| {
             StoreError::Io(std::io::Error::new(
@@ -176,9 +177,73 @@ impl AppStore {
         if !path.exists() {
             return Ok(ProjectWorkspace::default());
         }
-        let raw = fs::read_to_string(path)?;
-        let workspace = serde_json::from_str(&raw).unwrap_or_default();
-        Ok(sanitize_workspace(workspace))
+        let raw = fs::read_to_string(&path)?;
+        let mut value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => return Ok(ProjectWorkspace::default()),
+        };
+        let had_docs = value
+            .as_object_mut()
+            .is_some_and(|obj| obj.remove("docs").is_some());
+        let workspace: ProjectWorkspace = serde_json::from_value(value).unwrap_or_default();
+        let clean = sanitize_workspace(workspace);
+        if had_docs {
+            let encoded = serde_json::to_string_pretty(&clean)?;
+            fs::write(&path, encoded)?;
+        }
+        Ok(clean)
+    }
+
+    /// Create or update the card for one chat turn. The same folder shares one board.
+    pub fn upsert_turn_card(
+        &self,
+        cwd: &str,
+        turn_id: Uuid,
+        title: &str,
+        phase: TurnCardPhase,
+    ) -> Result<ProjectWorkspace, StoreError> {
+        let mut workspace = self.load_workspace(cwd)?;
+        if let Some(card) = workspace
+            .cards
+            .iter_mut()
+            .find(|card| card.turn_id == Some(turn_id))
+        {
+            match phase {
+                TurnCardPhase::Progress => {
+                    card.status = BoardStatus::Progress;
+                    card.failed = false;
+                }
+                TurnCardPhase::Done => {
+                    card.status = BoardStatus::Done;
+                    card.failed = false;
+                }
+                TurnCardPhase::Failed => {
+                    card.status = BoardStatus::Progress;
+                    card.failed = true;
+                }
+            }
+        } else {
+            let (status, failed) = match phase {
+                TurnCardPhase::Progress => (BoardStatus::Progress, false),
+                TurnCardPhase::Done => (BoardStatus::Done, false),
+                TurnCardPhase::Failed => (BoardStatus::Progress, true),
+            };
+            let trimmed = title.trim();
+            let title = if trimmed.is_empty() { "…" } else { trimmed };
+            workspace.cards.insert(
+                0,
+                BoardCard {
+                    id: Uuid::new_v4(),
+                    number: 0,
+                    title: title.to_string(),
+                    tag: String::new(),
+                    status,
+                    failed,
+                    turn_id: Some(turn_id),
+                },
+            );
+        }
+        self.save_workspace(cwd, &workspace)
     }
 
     pub fn save_workspace(
@@ -236,6 +301,13 @@ struct WorkspaceIndexEntry {
     id: Uuid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnCardPhase {
+    Progress,
+    Done,
+    Failed,
+}
+
 fn workspace_key(cwd: &str) -> Option<String> {
     let trimmed = cwd.trim();
     if trimmed.is_empty() {
@@ -249,10 +321,8 @@ fn workspace_key(cwd: &str) -> Option<String> {
 }
 
 const MAX_CARDS: usize = 200;
-const MAX_DOCS: usize = 100;
 const MAX_TITLE: usize = 200;
 const MAX_TAG: usize = 40;
-const MAX_BODY: usize = 100_000;
 
 fn sanitize_workspace(workspace: ProjectWorkspace) -> ProjectWorkspace {
     let mut next_number = workspace
@@ -261,11 +331,18 @@ fn sanitize_workspace(workspace: ProjectWorkspace) -> ProjectWorkspace {
         .map(|card| card.number)
         .max()
         .unwrap_or(0);
+    let mut seen_turns = Vec::new();
     let mut cards = Vec::new();
     for card in workspace.cards.into_iter().take(MAX_CARDS) {
         let title = cut_chars(&card.title, MAX_TITLE);
         if title.trim().is_empty() {
             continue;
+        }
+        if let Some(turn_id) = card.turn_id {
+            if seen_turns.contains(&turn_id) {
+                continue;
+            }
+            seen_turns.push(turn_id);
         }
         let mut number = card.number;
         if number == 0 {
@@ -281,21 +358,11 @@ fn sanitize_workspace(workspace: ProjectWorkspace) -> ProjectWorkspace {
                 BoardStatus::Done => BoardStatus::Done,
                 BoardStatus::Progress => BoardStatus::Progress,
             },
+            failed: card.failed,
+            turn_id: card.turn_id,
         });
     }
-    let mut docs = Vec::new();
-    for doc in workspace.docs.into_iter().take(MAX_DOCS) {
-        let title = cut_chars(&doc.title, MAX_TITLE);
-        if title.trim().is_empty() {
-            continue;
-        }
-        docs.push(LibraryDoc {
-            id: doc.id,
-            title,
-            body: cut_chars(&doc.body, MAX_BODY),
-        });
-    }
-    ProjectWorkspace { cards, docs }
+    ProjectWorkspace { cards }
 }
 
 fn cut_chars(text: &str, max: usize) -> String {
@@ -317,29 +384,29 @@ mod tests {
         AppStore { root }
     }
 
+    fn card(title: &str, status: BoardStatus) -> BoardCard {
+        BoardCard {
+            id: Uuid::new_v4(),
+            number: 0,
+            title: title.into(),
+            tag: String::new(),
+            status,
+            failed: false,
+            turn_id: None,
+        }
+    }
+
     #[test]
-    fn workspace_roundtrip_keeps_cards_and_docs_for_one_folder() {
+    fn workspace_roundtrip_keeps_cards_for_one_folder() {
         let store = scratch();
         let empty = store.load_workspace("/proj/app").unwrap();
         assert!(empty.cards.is_empty());
-        assert!(empty.docs.is_empty());
 
         let saved = store
             .save_workspace(
                 "/proj/app/",
                 &ProjectWorkspace {
-                    cards: vec![BoardCard {
-                        id: Uuid::new_v4(),
-                        number: 0,
-                        title: "  Write the notes  ".into(),
-                        tag: "docs".into(),
-                        status: BoardStatus::Progress,
-                    }],
-                    docs: vec![LibraryDoc {
-                        id: Uuid::new_v4(),
-                        title: "Spec".into(),
-                        body: "hello".into(),
-                    }],
+                    cards: vec![card("  Write the notes  ", BoardStatus::Progress)],
                 },
             )
             .unwrap();
@@ -347,7 +414,8 @@ mod tests {
         assert_eq!(saved.cards[0].number, 1);
         assert_eq!(saved.cards[0].title, "  Write the notes  ");
         assert_eq!(saved.cards[0].status, BoardStatus::Progress);
-        assert_eq!(saved.docs[0].body, "hello");
+        assert!(!saved.cards[0].failed);
+        assert!(saved.cards[0].turn_id.is_none());
 
         let loaded = store.load_workspace(r"\proj\app").unwrap();
         assert_eq!(loaded, saved);
@@ -364,23 +432,98 @@ mod tests {
             .save_workspace(
                 "/proj",
                 &ProjectWorkspace {
-                    cards: vec![BoardCard {
-                        id: Uuid::new_v4(),
-                        number: 4,
-                        title: "   ".into(),
-                        tag: String::new(),
-                        status: BoardStatus::Done,
-                    }],
-                    docs: vec![LibraryDoc {
-                        id: Uuid::new_v4(),
-                        title: " ".into(),
-                        body: "gone".into(),
-                    }],
+                    cards: vec![card("   ", BoardStatus::Done)],
                 },
             )
             .unwrap();
         assert!(saved.cards.is_empty());
-        assert!(saved.docs.is_empty());
+        let _ = fs::remove_dir_all(store.data_root());
+    }
+
+    #[test]
+    fn stored_documents_are_removed_from_the_board_file() {
+        let store = scratch();
+        store
+            .save_workspace(
+                "/proj",
+                &ProjectWorkspace {
+                    cards: vec![card("Keep", BoardStatus::Progress)],
+                },
+            )
+            .unwrap();
+        let index = store.load_workspace_index().unwrap();
+        let path = store.workspace_path(index.entries[0].id);
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        raw["docs"] = serde_json::json!([{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "title": "Spec",
+            "body": "secret body that must not stay"
+        }]);
+        fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let loaded = store.load_workspace("/proj").unwrap();
+        assert_eq!(loaded.cards.len(), 1);
+        assert_eq!(loaded.cards[0].title, "Keep");
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("secret body"));
+        assert!(!after.contains("\"docs\""));
+        let _ = fs::remove_dir_all(store.data_root());
+    }
+
+    #[test]
+    fn turn_card_updates_in_place_on_the_shared_folder() {
+        let store = scratch();
+        let turn = Uuid::new_v4();
+        let progress = store
+            .upsert_turn_card(
+                "/proj/app/",
+                turn,
+                "Fix the board",
+                TurnCardPhase::Progress,
+            )
+            .unwrap();
+        assert_eq!(progress.cards.len(), 1);
+        assert_eq!(progress.cards[0].status, BoardStatus::Progress);
+        assert!(!progress.cards[0].failed);
+        assert_eq!(progress.cards[0].number, 1);
+        assert_eq!(progress.cards[0].turn_id, Some(turn));
+        assert_eq!(progress.cards[0].title, "Fix the board");
+
+        let again = store
+            .upsert_turn_card(r"\proj\app", turn, "Other title", TurnCardPhase::Progress)
+            .unwrap();
+        assert_eq!(again.cards.len(), 1);
+        assert_eq!(again.cards[0].id, progress.cards[0].id);
+        assert_eq!(again.cards[0].title, "Fix the board");
+
+        let failed = store
+            .upsert_turn_card("/proj/app", turn, "ignored", TurnCardPhase::Failed)
+            .unwrap();
+        assert_eq!(failed.cards[0].status, BoardStatus::Progress);
+        assert!(failed.cards[0].failed);
+        assert_eq!(failed.cards[0].title, "Fix the board");
+
+        let done = store
+            .upsert_turn_card("/proj/app", turn, "ignored", TurnCardPhase::Done)
+            .unwrap();
+        assert_eq!(done.cards[0].status, BoardStatus::Done);
+        assert!(!done.cards[0].failed);
+        assert_eq!(done.cards[0].id, progress.cards[0].id);
+
+        let other = Uuid::new_v4();
+        let two = store
+            .upsert_turn_card("/proj/app", other, "Second turn", TurnCardPhase::Failed)
+            .unwrap();
+        assert_eq!(two.cards.len(), 2);
+        let second = two
+            .cards
+            .iter()
+            .find(|card| card.turn_id == Some(other))
+            .unwrap();
+        assert_eq!(second.status, BoardStatus::Progress);
+        assert!(second.failed);
+        assert!(store.load_workspace("/other").unwrap().cards.is_empty());
         let _ = fs::remove_dir_all(store.data_root());
     }
 }
