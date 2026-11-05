@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { Folder, Plus, Settings, Terminal } from "lucide-react";
+import { Folder, Kanban, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
 import { FilePanel } from "@/components/file-panel";
+import { ProjectPanel } from "@/components/project-panel";
 import { producedFilePaths, sameProjectFile } from "@/produced-files";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
@@ -406,6 +407,7 @@ export default function App() {
   const fileSignature = `${active?.id ?? ""}:${producedPaths.join("\0")}`;
   const [dismissedFiles, setDismissedFiles] = useState<string | null>(null);
   const [treeOpenFor, setTreeOpenFor] = useState<string | null>(null);
+  const [projectOpen, setProjectOpen] = useState(false);
   const [openedFile, setOpenedFile] = useState<{ sessionId: string; path: string } | null>(null);
   const openedPath = active && openedFile?.sessionId === active.id ? openedFile.path : null;
   const filesOpen =
@@ -654,6 +656,19 @@ export default function App() {
                     {t("projectFolder")}
                   </Button>
                 )}
+                {active && (
+                  <Button
+                    type="button"
+                    variant={projectOpen ? "secondary" : "outline"}
+                    size="sm"
+                    aria-pressed={projectOpen}
+                    aria-label={projectOpen ? t("closeProjectBoard") : t("openProjectBoard")}
+                    onClick={() => setProjectOpen((open) => !open)}
+                  >
+                    <Kanban className="size-3.5" />
+                    {t("projectBoard")}
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="icon"
@@ -898,6 +913,9 @@ export default function App() {
                 onActivePath={choosePanelPath}
                 onClose={closeFilePanel}
               />
+            )}
+            {projectOpen && active && (
+              <ProjectPanel key={active.cwd} cwd={active.cwd} onClose={() => setProjectOpen(false)} />
             )}
             </div>
           </>

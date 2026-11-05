@@ -186,6 +186,18 @@ select {
   }
 }
 
+.project-panel {
+  width: 100%;
+  max-width: 24rem;
+}
+
+@media (min-width: 821px) {
+  .project-panel {
+    width: 22rem;
+    max-width: 22rem;
+  }
+}
+
 .md .file-link {
   display: inline;
   margin: 0;

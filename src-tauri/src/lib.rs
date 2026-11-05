@@ -8,9 +8,9 @@ mod skills;
 mod store;
 
 use chrono::Utc;
-use serde::Serialize;
 use cli::{ActiveRun, RunSpec};
 use models::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -261,8 +261,7 @@ fn create_session(
         model: normalize_model(model),
         effort: None,
         fast_mode: false,
-        allowed_tools_preset: allowed_tools_preset
-            .unwrap_or(settings.allowed_tools_preset),
+        allowed_tools_preset: allowed_tools_preset.unwrap_or(settings.allowed_tools_preset),
         created_at: now,
         updated_at: now,
         turns: vec![],
@@ -388,7 +387,9 @@ async fn send_message(
 
     let settings = state.store.load_settings().map_err(err)?;
     if secrets::load_api_key().map_err(err)?.is_none() {
-        return Err("No API key configured. Open Settings and paste your Anthropic API key.".into());
+        return Err(
+            "No API key configured. Open Settings and paste your Anthropic API key.".into(),
+        );
     }
 
     let binary = cli::resolve_binary(settings.claude_binary_path.as_deref()).map_err(err)?;
@@ -659,6 +660,23 @@ fn locate_project_files(
     Ok(kept)
 }
 
+#[tauri::command]
+fn get_project_workspace(
+    state: State<'_, AppState>,
+    cwd: String,
+) -> Result<ProjectWorkspace, String> {
+    state.store.load_workspace(&cwd).map_err(err)
+}
+
+#[tauri::command]
+fn save_project_workspace(
+    state: State<'_, AppState>,
+    cwd: String,
+    workspace: ProjectWorkspace,
+) -> Result<ProjectWorkspace, String> {
+    state.store.save_workspace(&cwd, &workspace).map_err(err)
+}
+
 fn load_session(state: &AppState, id: Uuid) -> Result<GuiSession, String> {
     let mut session = state.store.get_session(id).map_err(err)?;
     if prepare_session(&mut session) {
@@ -730,8 +748,7 @@ fn create_session_inner(
         model: normalize_model(model),
         effort: None,
         fast_mode: false,
-        allowed_tools_preset: allowed_tools_preset
-            .unwrap_or(settings.allowed_tools_preset),
+        allowed_tools_preset: allowed_tools_preset.unwrap_or(settings.allowed_tools_preset),
         created_at: now,
         updated_at: now,
         turns: vec![],
@@ -804,7 +821,9 @@ fn normalize_model(raw: Option<String>) -> Option<String> {
     if trimmed.is_empty()
         || trimmed.len() > 128
         || trimmed.starts_with("sk-ant")
-        || trimmed.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || trimmed
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
     {
         return None;
     }
@@ -873,7 +892,11 @@ fn session_cost_usd(session: &GuiSession) -> Option<f64> {
             any = true;
         }
     }
-    if any && sum.is_finite() { Some(sum) } else { None }
+    if any && sum.is_finite() {
+        Some(sum)
+    } else {
+        None
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -902,6 +925,8 @@ pub fn run() {
             write_project_file,
             list_project_dir,
             locate_project_files,
+            get_project_workspace,
+            save_project_workspace,
             set_session_model,
             set_session_effort,
             set_session_fast_mode,
