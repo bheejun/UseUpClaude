@@ -1,11 +1,12 @@
 //! Recover GUI turns stuck on the literal `(empty response)` from Claude Code JSONL.
 
 use crate::models::{GuiSession, TurnRole};
+use crate::transcript;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const EMPTY_PLACEHOLDER: &str = "(empty response)";
 const MAX_LINE_BYTES: usize = 256 * 1024;
@@ -26,7 +27,7 @@ pub fn recover_empty_response_turns(session: &mut GuiSession) -> bool {
     }) {
         return false;
     }
-    let Some(path) = find_session_jsonl(cli_session_id, &session.cwd) else {
+    let Some(path) = transcript::find_session_jsonl(cli_session_id, &session.cwd) else {
         return false;
     };
     recover_from_jsonl(session, &path)
@@ -74,82 +75,6 @@ fn recover_from_jsonl(session: &mut GuiSession, path: &Path) -> bool {
         changed = true;
     }
     changed
-}
-
-fn find_session_jsonl(cli_session_id: &str, cwd: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let file_name = format!("{cli_session_id}.jsonl");
-    let projects = home.join(".claude").join("projects");
-    if let Some(path) = prefer_cwd_jsonl(&projects, cwd, &file_name) {
-        return Some(path);
-    }
-    if let Some(path) = scan_for_jsonl(&projects, &file_name) {
-        return Some(path);
-    }
-    let sessions = home.join(".claude").join("sessions");
-    if sessions.is_dir() {
-        if let Some(path) = prefer_cwd_jsonl(&sessions, cwd, &file_name) {
-            return Some(path);
-        }
-        return scan_for_jsonl(&sessions, &file_name);
-    }
-    None
-}
-
-fn prefer_cwd_jsonl(root: &Path, cwd: &str, file_name: &str) -> Option<PathBuf> {
-    let trimmed = cwd.trim();
-    if trimmed.is_empty() || !root.is_dir() {
-        return None;
-    }
-    let sanitized = sanitize_project_dir(trimmed);
-    let direct = root.join(&sanitized).join(file_name);
-    if direct.is_file() {
-        return Some(direct);
-    }
-    // Folder names sometimes omit a drive letter nuance; try a contains match.
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return None;
-    };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == sanitized || name.contains(&sanitized) || sanitized.contains(&name) {
-            let path = dir.join(file_name);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
-fn scan_for_jsonl(root: &Path, file_name: &str) -> Option<PathBuf> {
-    let Ok(projects) = std::fs::read_dir(root) else {
-        return None;
-    };
-    for project in projects.flatten() {
-        let dir = project.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let path = dir.join(file_name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn sanitize_project_dir(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | ' ' => '-',
-            _ => c,
-        })
-        .collect()
 }
 
 fn extract_answers_from_jsonl(path: &Path) -> Vec<String> {
@@ -282,15 +207,13 @@ mod tests {
             updated_at: Utc::now(),
             turns: vec![turn("user ask"), turn(EMPTY_PLACEHOLDER)],
             turn_costs_are_incremental: true,
+            cli_tip_uuid: None,
         };
         session.turns[0].role = TurnRole::User;
 
         assert!(recover_from_jsonl(&mut session, &path));
         assert_eq!(session.turns[1].content, "From result line");
-        assert_eq!(
-            scan_for_jsonl(&root, &format!("{sid}.jsonl")),
-            Some(path.clone())
-        );
+        assert!(path.is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 

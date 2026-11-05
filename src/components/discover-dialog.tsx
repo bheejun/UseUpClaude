@@ -49,6 +49,9 @@ export function DiscoverDialog({
         <p className="mb-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
           {t("discoverPrivacy")}
         </p>
+        <p className="mb-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {t("concurrentForkNote")}
+        </p>
         {err && <p className="mb-2 text-[13px] text-destructive">{err}</p>}
         {busy && <p className="text-[13px] text-muted-foreground">{t("loading")}</p>}
         {!busy && projects.length === 0 && (

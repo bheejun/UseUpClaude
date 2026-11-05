@@ -116,8 +116,13 @@ const en = {
   discoverEmpty: "No Claude Code sessions found under ~/.claude/projects.",
   discoverOpen: "Open",
   discoverNoCwd: "Folder unknown",
-  discoverPrivacy: "Only the session id, folder, and a short title are read. The transcript is not imported.",
-  resumedEmpty: "This continues a Claude Code session. Earlier turns stay in Claude Code. The next message uses --resume.",
+  discoverPrivacy:
+    "Opens the session id and imports user/assistant text from the Claude Code JSONL tip for display. The app does not write Claude's JSONL except through the CLI.",
+  resumedEmpty:
+    "This continues a Claude Code session. User and assistant text from the latest tip is shown here. The next message uses --resume from that tip.",
+  concurrentForkNote:
+    "Using this app and Claude Code on the same session at once can still fork. Each send resumes from the latest tip the app can see.",
+  tipChosen: "tip {id}",
   emptyThread: "Send a message. The reply shows up here when claude -p finishes.",
   close: "Close",
   you: "You",
@@ -287,8 +292,13 @@ const ko: Dict = {
   discoverEmpty: "~/.claude/projects 아래에서 Claude Code 세션을 찾지 못했습니다.",
   discoverOpen: "열기",
   discoverNoCwd: "폴더를 알 수 없음",
-  discoverPrivacy: "세션 id, 폴더, 짧은 제목만 읽습니다. 대화 원문은 가져오지 않습니다.",
-  resumedEmpty: "Claude Code 세션을 이어갑니다. 이전 턴은 Claude Code에 남아 있고, 다음 메시지는 --resume을 사용합니다.",
+  discoverPrivacy:
+    "세션 id를 열고 Claude Code JSONL tip의 사용자/어시스턴트 텍스트를 표시용으로 가져옵니다. Claude JSONL에는 CLI를 통해서만 씁니다.",
+  resumedEmpty:
+    "Claude Code 세션을 이어갑니다. 최신 tip의 사용자·어시스턴트 텍스트가 여기에 보입니다. 다음 메시지는 그 tip에서 --resume합니다.",
+  concurrentForkNote:
+    "앱과 Claude Code를 같은 세션에서 동시에 쓰면 여전히 포크될 수 있습니다. 보낼 때마다 앱이 본 최신 tip에서 resume합니다.",
+  tipChosen: "tip {id}",
   emptyThread: "메시지를 보내면 claude -p가 끝난 뒤 답변이 여기에 나타납니다.",
   close: "닫기",
   you: "나",
@@ -455,8 +465,13 @@ const ja: Dict = {
   discoverEmpty: "~/.claude/projects に Claude Code セッションが見つかりません。",
   discoverOpen: "開く",
   discoverNoCwd: "フォルダ不明",
-  discoverPrivacy: "読むのはセッション id、フォルダ、短いタイトルだけです。本文は取り込みません。",
-  resumedEmpty: "Claude Code のセッションを続けます。以前のターンは Claude Code 側に残り、次のメッセージは --resume を使います。",
+  discoverPrivacy:
+    "セッション id を開き、Claude Code JSONL tip のユーザー/アシスタント文を表示用に取り込みます。Claude の JSONL へは CLI 経由でのみ書き込みます。",
+  resumedEmpty:
+    "Claude Code のセッションを続けます。最新 tip のユーザー・アシスタント文がここに表示され、次のメッセージはその tip から --resume します。",
+  concurrentForkNote:
+    "このアプリと Claude Code を同じセッションで同時に使うと、まだフォークすることがあります。送信のたびにアプリが見た最新 tip から resume します。",
+  tipChosen: "tip {id}",
   emptyThread: "メッセージを送ると、claude -p が終わったあと返信がここに出ます。",
   close: "閉じる",
   you: "あなた",
@@ -622,8 +637,13 @@ const zh: Dict = {
   discoverEmpty: "在 ~/.claude/projects 下没有找到 Claude Code 会话。",
   discoverOpen: "打开",
   discoverNoCwd: "未知文件夹",
-  discoverPrivacy: "只读取会话 id、文件夹和短标题。不会导入对话原文。",
-  resumedEmpty: "这将继续一个 Claude Code 会话。之前的回合仍留在 Claude Code 中，下一条消息会使用 --resume。",
+  discoverPrivacy:
+    "打开会话 id，并从 Claude Code JSONL tip 导入用户/助手文本用于显示。除通过 CLI 外，不会写入 Claude 的 JSONL。",
+  resumedEmpty:
+    "这将继续一个 Claude Code 会话。最新 tip 的用户与助手文本会显示在这里；下一条消息从该 tip 使用 --resume。",
+  concurrentForkNote:
+    "同时在本应用和 Claude Code 中使用同一会话仍可能分叉。每次发送都会从应用所见的最新 tip 继续。",
+  tipChosen: "tip {id}",
   emptyThread: "发送消息后，claude -p 结束时回复会显示在这里。",
   close: "关闭",
   you: "你",
@@ -790,8 +810,13 @@ const es: Dict = {
   discoverEmpty: "No hay sesiones de Claude Code en ~/.claude/projects.",
   discoverOpen: "Abrir",
   discoverNoCwd: "Carpeta desconocida",
-  discoverPrivacy: "Solo se leen el id de sesión, la carpeta y un título corto. No se importa la transcripción.",
-  resumedEmpty: "Esto continúa una sesión de Claude Code. Los turnos anteriores siguen allí. El siguiente mensaje usa --resume.",
+  discoverPrivacy:
+    "Abre el id de sesión e importa texto de usuario/asistente del tip JSONL de Claude Code para mostrarlo. No escribe el JSONL de Claude salvo a través del CLI.",
+  resumedEmpty:
+    "Esto continúa una sesión de Claude Code. El texto de usuario y asistente del tip más reciente se muestra aquí. El siguiente mensaje usa --resume desde ese tip.",
+  concurrentForkNote:
+    "Usar la app y Claude Code en la misma sesión a la vez aún puede crear una bifurcación. Cada envío reanuda desde el tip más reciente que la app pueda ver.",
+  tipChosen: "tip {id}",
   emptyThread: "Envía un mensaje. La respuesta aparece aquí cuando termina claude -p.",
   close: "Cerrar",
   you: "Tú",

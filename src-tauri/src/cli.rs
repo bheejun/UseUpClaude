@@ -202,10 +202,18 @@ fn print_mode_args(
 pub async fn detect_claude(override_path: Option<&str>) -> ClaudeDetectResult {
     match resolve_binary(override_path) {
         Ok(path) => {
-            let version = Command::new(&path)
+            let mut version_cmd = Command::new(&path);
+            version_cmd
                 .arg("--version")
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                version_cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let version = version_cmd
                 .output()
                 .await
                 .ok()
@@ -364,6 +372,15 @@ pub async fn run_claude_managed(
     };
     if let Some(key) = chat_key {
         cmd.env("ANTHROPIC_API_KEY", key);
+    }
+
+    // GUI parent on Windows: hide the empty console that console-subsystem
+    // claude.exe would otherwise allocate when stdio is piped.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
     let mut child = cmd.spawn()?;

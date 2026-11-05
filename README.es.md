@@ -17,7 +17,7 @@ El título de la ventana y el nombre del producto son UseUpClaude. El ejecutable
 | Coste | `total_cost_usd` de ese turno cuando el CLI lo informa |
 | Saldo | Una clave de API normal no puede leer el crédito restante. No se raspa la consola |
 | Proyectos | Chats agrupados por carpeta de trabajo (cwd) |
-| Sesiones existentes | Lee id, carpeta y un título corto de `~/.claude/projects` y usa `--resume`. No importa la transcripción |
+| Sesiones existentes | Lee el tip JSONL en `~/.claude/projects`, importa texto de usuario/asistente para mostrarlo y usa `--resume` desde el tip más reciente en cada envío |
 | Idiomas | 한국어, English, 日本語, 简体中文, Español. Locale del sistema; si no, coreano |
 | Auth | Pega una clave de Anthropic en Ajustes. Queda en el almacén del sistema y no se registra |
 

@@ -633,6 +633,9 @@ export default function App() {
                     {active.cwd}
                     {" · "}
                     {active.cliSessionId ? t("resumeReady") : t("newSession")}
+                    {active.cliTipUuid
+                      ? ` · ${t("tipChosen", { id: active.cliTipUuid.slice(0, 8) })}`
+                      : null}
                   </p>
                 )}
               </div>
@@ -699,6 +702,11 @@ export default function App() {
                   {bubbles.length === 0 && !sessionBusy && (
                     <p className="mx-auto max-w-xl px-6 pt-8 text-[13px] leading-relaxed text-muted-foreground">
                       {active.cliSessionId ? t("resumedEmpty") : t("emptyThread")}
+                    </p>
+                  )}
+                  {active.cliSessionId && (
+                    <p className="mx-auto max-w-xl px-6 pt-3 text-[11px] leading-relaxed text-muted-foreground">
+                      {t("concurrentForkNote")}
                     </p>
                   )}
                   <ChatThread

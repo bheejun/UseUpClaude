@@ -7,6 +7,7 @@ mod repair;
 mod secrets;
 mod skills;
 mod store;
+mod transcript;
 
 use chrono::Utc;
 use cli::{ActiveRun, RunSpec};
@@ -263,7 +264,7 @@ fn create_session(
         .map(|t| truncate(t.trim(), 80))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "New chat".into());
-    let session = GuiSession {
+    let mut session = GuiSession {
         id: Uuid::new_v4(),
         cli_session_id,
         cwd,
@@ -276,7 +277,10 @@ fn create_session(
         updated_at: now,
         turns: vec![],
         turn_costs_are_incremental: true,
+        cli_tip_uuid: None,
     };
+    // Import Claude Code transcript for display when attaching an existing session.
+    let _ = transcript::sync_gui_from_cli(&mut session);
     state.store.save_session(&session).map_err(err)?;
     Ok(session)
 }
@@ -464,6 +468,12 @@ async fn send_message(
         session.title = truncate(&prompt, 60);
     }
 
+    // Before a resumed send, re-resolve the Claude Code JSONL tip so we attach
+    // to the latest branch tip Claude Code wrote (not a stale parent).
+    if session.cli_session_id.is_some() {
+        let _ = transcript::sync_gui_from_cli(&mut session);
+    }
+
     // Block a second turn on this chat before any transcript write.
     let (_running, active_run) = state.runs.begin(session.id)?;
 
@@ -555,6 +565,8 @@ async fn send_message(
             if let Some(sid) = &out.session_id {
                 session.cli_session_id = Some(sid.clone());
             }
+            // Tip only — do not rebuild turns mid-response (would drop this turn).
+            let _ = transcript::refresh_tip_uuid(&mut session);
 
             let prior = session_cost_usd(&session).unwrap_or(0.0);
             let turn = session
@@ -731,7 +743,9 @@ fn prepare_session(session: &mut GuiSession) -> bool {
     let sanitized = sanitize_session(session);
     let normalized = normalize_stored_turn_costs(session);
     let recovered = repair::recover_empty_response_turns(session);
-    sanitized || normalized || recovered
+    // Pull Claude Code tip + transcript when linked and empty/out of date.
+    let synced = transcript::sync_gui_from_cli(session);
+    sanitized || normalized || recovered || synced
 }
 
 /// Older builds stored the raw `--output-format json` object as the assistant
@@ -796,6 +810,7 @@ fn create_session_inner(
         updated_at: now,
         turns: vec![],
         turn_costs_are_incremental: true,
+        cli_tip_uuid: None,
     };
     store.save_session(&session)?;
     Ok(session)
@@ -1020,6 +1035,7 @@ mod tests {
             updated_at: now,
             turns: costs.iter().copied().map(|cost| turn(Some(cost))).collect(),
             turn_costs_are_incremental: false,
+            cli_tip_uuid: None,
         }
     }
 
