@@ -462,6 +462,7 @@ export default function App() {
         costUsd: shown.costUsd,
         finishedAt: turn.finishedAt,
         events: turn.events ?? [],
+        offMainline: turn.offMainline === true,
       };
     };
     const settled = turns.filter((turn) => turn.status !== "pending").map(toBubble);

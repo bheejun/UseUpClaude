@@ -153,6 +153,12 @@ pub struct GuiTurn {
     /// Completed tool calls from this turn. `content` stays the result text.
     #[serde(default)]
     pub events: Vec<TurnEvent>,
+    /// Claude Code JSONL message `uuid` when this turn was imported or matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_uuid: Option<String>,
+    /// True when this turn is not on the current tip→root resume path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off_mainline: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

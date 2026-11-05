@@ -80,6 +80,10 @@ export interface GuiTurn {
   costUsd?: number | null;
   /** Completed tool calls from this turn. `content` stays the result text. */
   events?: TurnEvent[];
+  /** Claude Code JSONL message uuid when imported or matched. */
+  cliUuid?: string | null;
+  /** True when this turn is not on the current tip→root resume path. */
+  offMainline?: boolean;
 }
 
 export interface GuiSession {

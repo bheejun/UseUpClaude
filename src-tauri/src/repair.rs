@@ -178,6 +178,8 @@ mod tests {
             status: TurnStatus::Done,
             cost_usd: Some(0.1),
             events: vec![],
+            cli_uuid: None,
+            off_mainline: false,
         }
     }
 

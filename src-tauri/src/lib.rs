@@ -488,6 +488,8 @@ async fn send_message(
         status: TurnStatus::Done,
         cost_usd: None,
         events: Vec::new(),
+        cli_uuid: None,
+        off_mainline: false,
     };
     session.turns.push(user_turn);
 
@@ -501,6 +503,8 @@ async fn send_message(
         status: TurnStatus::Pending,
         cost_usd: None,
         events: Vec::new(),
+        cli_uuid: None,
+        off_mainline: false,
     };
     let pending_id = pending.id;
     session.turns.push(pending);
@@ -1017,6 +1021,8 @@ mod tests {
             status: TurnStatus::Done,
             cost_usd: cost,
             events: Vec::new(),
+            cli_uuid: None,
+            off_mainline: false,
         }
     }
 
