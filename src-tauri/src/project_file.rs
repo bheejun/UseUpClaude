@@ -50,6 +50,19 @@ fn unsupported(path: String) -> ProjectFileView {
     }
 }
 
+/// Replace a text file inside the project. The session file never stores this body.
+pub(crate) fn write_in_project(cwd: &Path, raw_path: &str, content: &str) -> Result<(), String> {
+    if content.len() > PANEL_MAX_BYTES || content.as_bytes().contains(&0) {
+        return Err("unsupported".into());
+    }
+    let full = resolve_inside(cwd, raw_path)?;
+    if !full.is_file() || is_binary_extension(&full) {
+        return Err("unsupported".into());
+    }
+    std::fs::write(&full, content).map_err(|_| "write failed".to_string())?;
+    Ok(())
+}
+
 /// Whether `raw` is a file inside `cwd`. Does not read the body.
 pub(crate) fn locate_in_project(cwd: &Path, raw_path: &str) -> Result<(), String> {
     let full = resolve_inside(cwd, raw_path)?;
@@ -279,6 +292,42 @@ mod tests {
         let sibling = outside.file_name().unwrap().to_string_lossy();
         let climbed = format!("../{sibling}/secret.txt");
         assert!(read_in_project(&root, &climbed).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn text_edit_roundtrips_inside_the_project_only() {
+        let root = scratch();
+        fs::write(root.join("notes.md"), "# Old\n").unwrap();
+        fs::write(root.join("plain.txt"), "old").unwrap();
+        fs::write(root.join("pic.png"), [0_u8, 1, 2, 3]).unwrap();
+        let outside = scratch();
+        fs::write(outside.join("secret.txt"), "keep").unwrap();
+        let cwd = display_path(&root);
+        let notes = cwd.join("notes.md");
+
+        write_in_project(&cwd, notes.to_str().unwrap(), "# New\n").unwrap();
+        let view = read_in_project(&cwd, "notes.md").unwrap();
+        assert_eq!(view.content.as_deref(), Some("# New\n"));
+        write_in_project(&root, "plain.txt", "newer").unwrap();
+        assert_eq!(
+            read_in_project(&root, "plain.txt").unwrap().content.as_deref(),
+            Some("newer")
+        );
+
+        assert!(write_in_project(&cwd, cwd.join("pic.png").to_str().unwrap(), "nope").is_err());
+        assert_eq!(fs::read(root.join("pic.png")).unwrap(), vec![0, 1, 2, 3]);
+        let secret = display_path(&outside).join("secret.txt");
+        assert!(write_in_project(&cwd, secret.to_str().unwrap(), "pwn").is_err());
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "keep");
+        assert!(write_in_project(&root, "../secret.txt", "no").is_err());
+        assert!(write_in_project(&root, "plain.txt", "bad\0text").is_err());
+        assert_eq!(
+            read_in_project(&root, "plain.txt").unwrap().content.as_deref(),
+            Some("newer")
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);

@@ -152,6 +152,13 @@ const en = {
   filePreviewMissing: "Couldn't read this file from the project folder.",
   filePreviewTruncated: "Showing the start of the file.",
   filePreviewLoading: "Reading file…",
+  editFile: "Edit",
+  editMarkdownSource: "Edit source",
+  saveFile: "Save",
+  savingFile: "Saving…",
+  cancelFileEdit: "Cancel",
+  fileSaveFailed: "Couldn't save this file to the project folder.",
+  resizeFilePanel: "Resize the file panel",
 } as const;
 
 type Key = keyof typeof en;
@@ -280,6 +287,13 @@ const ko: Dict = {
   filePreviewMissing: "프로젝트 폴더에서 이 파일을 읽지 못했습니다.",
   filePreviewTruncated: "파일의 앞부분만 보여 줍니다.",
   filePreviewLoading: "파일을 읽는 중…",
+  editFile: "편집",
+  editMarkdownSource: "소스 편집",
+  saveFile: "저장",
+  savingFile: "저장 중…",
+  cancelFileEdit: "취소",
+  fileSaveFailed: "프로젝트 폴더에 이 파일을 저장하지 못했습니다.",
+  resizeFilePanel: "파일 패널 너비 조절",
 };
 
 const ja: Dict = {
@@ -405,6 +419,13 @@ const ja: Dict = {
   filePreviewMissing: "プロジェクトフォルダからこのファイルを読めませんでした。",
   filePreviewTruncated: "ファイルの先頭だけを表示しています。",
   filePreviewLoading: "ファイルを読み込み中…",
+  editFile: "編集",
+  editMarkdownSource: "ソースを編集",
+  saveFile: "保存",
+  savingFile: "保存中…",
+  cancelFileEdit: "キャンセル",
+  fileSaveFailed: "プロジェクトフォルダにこのファイルを保存できませんでした。",
+  resizeFilePanel: "ファイルパネルの幅を変える",
 };
 
 const zh: Dict = {
@@ -529,6 +550,13 @@ const zh: Dict = {
   filePreviewMissing: "无法从项目文件夹读取此文件。",
   filePreviewTruncated: "只显示文件开头。",
   filePreviewLoading: "正在读取文件…",
+  editFile: "编辑",
+  editMarkdownSource: "编辑源码",
+  saveFile: "保存",
+  savingFile: "正在保存…",
+  cancelFileEdit: "取消",
+  fileSaveFailed: "未能把此文件保存到项目文件夹。",
+  resizeFilePanel: "调整文件面板宽度",
 };
 
 const es: Dict = {
@@ -654,6 +682,13 @@ const es: Dict = {
   filePreviewMissing: "No se pudo leer este archivo en la carpeta del proyecto.",
   filePreviewTruncated: "Se muestra el inicio del archivo.",
   filePreviewLoading: "Leyendo archivo…",
+  editFile: "Editar",
+  editMarkdownSource: "Editar el código",
+  saveFile: "Guardar",
+  savingFile: "Guardando…",
+  cancelFileEdit: "Cancelar",
+  fileSaveFailed: "No se pudo guardar este archivo en la carpeta del proyecto.",
+  resizeFilePanel: "Cambiar el ancho del panel de archivos",
 };
 
 const DICTS: Record<Locale, Dict> = { en, ko, ja, zh, es };
