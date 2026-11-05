@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { Folder, Kanban, Plus, Settings, Terminal } from "lucide-react";
+import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
@@ -407,7 +407,6 @@ export default function App() {
   const [dismissedFiles, setDismissedFiles] = useState<string | null>(null);
   const [treeOpenFor, setTreeOpenFor] = useState<string | null>(null);
   const [projectOpen, setProjectOpen] = useState(false);
-  const [projectSection, setProjectSection] = useState<"board" | "library">("library");
   const [openedFile, setOpenedFile] = useState<{ sessionId: string; path: string } | null>(null);
   const openedPath = active && openedFile?.sessionId === active.id ? openedFile.path : null;
   const filesOpen =
@@ -415,8 +414,7 @@ export default function App() {
     (active != null && treeOpenFor === active.id) ||
     (producedPaths.length > 0 && dismissedFiles !== fileSignature);
   const panelOpen = projectOpen || filesOpen;
-  const libraryShown = panelOpen && projectSection === "library";
-  const boardShown = panelOpen && projectSection === "board";
+  const libraryShown = panelOpen;
   const closeFilePanel = () => {
     setOpenedFile(null);
     setDismissedFiles(fileSignature);
@@ -432,7 +430,6 @@ export default function App() {
       const match = producedPaths.find((item) => sameProjectFile(item, path, active.cwd)) ?? path;
       setDismissedFiles(null);
       setTreeOpenFor(active.id);
-      setProjectSection("library");
       setOpenedFile({ sessionId: active.id, path: match });
     },
     [active, producedPaths],
@@ -448,14 +445,6 @@ export default function App() {
     },
     [active, producedPaths],
   );
-
-  const libraryFor = useRef<string | null>(null);
-  useEffect(() => {
-    if (!active || producedPaths.length === 0 || dismissedFiles === fileSignature) return;
-    if (libraryFor.current === fileSignature) return;
-    libraryFor.current = fileSignature;
-    setProjectSection("library");
-  }, [active, producedPaths.length, dismissedFiles, fileSignature]);
 
   useEffect(() => {
     if (!active || sessionBusy || !active.fastMode || supportsFastMode(active.model)) return;
@@ -665,7 +654,6 @@ export default function App() {
                       if (libraryShown) closeProject();
                       else {
                         setProjectOpen(true);
-                        setProjectSection("library");
                         setTreeOpenFor(active.id);
                         setDismissedFiles(null);
                       }
@@ -673,25 +661,6 @@ export default function App() {
                   >
                     <Folder className="size-3.5" />
                     {t("projectLibrary")}
-                  </Button>
-                )}
-                {active && (
-                  <Button
-                    type="button"
-                    variant={boardShown ? "secondary" : "outline"}
-                    size="sm"
-                    aria-pressed={boardShown}
-                    aria-label={boardShown ? t("closeProjectBoard") : t("openProjectBoard")}
-                    onClick={() => {
-                      if (boardShown) closeProject();
-                      else {
-                        setProjectOpen(true);
-                        setProjectSection("board");
-                      }
-                    }}
-                  >
-                    <Kanban className="size-3.5" />
-                    {t("projectBoard")}
                   </Button>
                 )}
                 <Button
@@ -934,8 +903,6 @@ export default function App() {
                 key={active.cwd}
                 sessionId={active.id}
                 cwd={active.cwd}
-                section={projectSection}
-                onSection={setProjectSection}
                 activePath={openedPath}
                 onActivePath={choosePanelPath}
                 onClose={closeProject}

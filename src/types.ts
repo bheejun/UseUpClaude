@@ -60,22 +60,6 @@ export interface ProjectDirListing {
   truncated: boolean;
 }
 
-export type BoardStatus = "progress" | "done";
-
-export interface BoardCard {
-  id: string;
-  number: number;
-  title: string;
-  tag: string;
-  status: BoardStatus;
-  failed?: boolean;
-  turnId?: string | null;
-}
-
-export interface ProjectWorkspace {
-  cards: BoardCard[];
-}
-
 export interface AppSettings {
   claudeBinaryPath: string | null;
   defaultCwd: string | null;
