@@ -50,6 +50,12 @@ function slash(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
+export function folderKey(cwd: string): string {
+  let key = cwd.trim().replace(/\\/g, "/");
+  while (key.length > 1 && key.endsWith("/")) key = key.slice(0, -1);
+  return key;
+}
+
 export function projectRelativePath(path: string, cwd: string): string {
   const target = slash(path);
   const base = slash(cwd);

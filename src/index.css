@@ -174,27 +174,14 @@ select {
   text-underline-offset: 2px;
 }
 
-.file-panel {
-  width: 100%;
-  max-width: 24rem;
-}
-
-@media (min-width: 821px) {
-  .file-panel {
-    width: var(--file-panel-width, 22rem);
-    max-width: min(72vw, 64rem);
-  }
-}
-
 .project-panel {
   width: 100%;
-  max-width: 24rem;
 }
 
 @media (min-width: 821px) {
   .project-panel {
-    width: 22rem;
-    max-width: 22rem;
+    width: var(--project-panel-width, 42rem);
+    max-width: min(72vw, 64rem);
   }
 }
 

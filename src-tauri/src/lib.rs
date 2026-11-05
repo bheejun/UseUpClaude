@@ -14,7 +14,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use store::AppStore;
+use store::{AppStore, TurnCardPhase};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -352,6 +352,44 @@ async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionTestRes
 }
 
 const TURN_EVENT: &str = "turn-event";
+const WORKSPACE_EVENT: &str = "project-workspace";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkspaceEvent {
+    cwd: String,
+}
+
+fn note_turn_card(
+    state: &AppState,
+    app: &AppHandle,
+    cwd: &str,
+    turn_id: Uuid,
+    title: &str,
+    phase: TurnCardPhase,
+) {
+    if state
+        .store
+        .upsert_turn_card(cwd, turn_id, title, phase)
+        .is_err()
+    {
+        return;
+    }
+    let _ = app.emit(
+        WORKSPACE_EVENT,
+        ProjectWorkspaceEvent {
+            cwd: cwd.to_string(),
+        },
+    );
+}
+
+fn card_title(prompt: &str) -> String {
+    let line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(prompt);
+    truncate(line.trim(), 120)
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -469,10 +507,28 @@ async fn send_message(
     session.turns.push(pending);
     session.updated_at = Utc::now();
     state.store.save_session(&session).map_err(err)?;
+    let card_title = card_title(&prompt);
+    note_turn_card(
+        &state,
+        &app,
+        &session.cwd,
+        pending_id,
+        &card_title,
+        TurnCardPhase::Progress,
+    );
 
     if !cwd.is_dir() {
         let msg = format!("cwd does not exist: {}", session.cwd);
-        return fail_pending(&state, session, pending_id, msg, None, Vec::new());
+        let response = fail_pending(&state, session, pending_id, msg, None, Vec::new())?;
+        note_turn_card(
+            &state,
+            &app,
+            &response.session.cwd,
+            pending_id,
+            &card_title,
+            TurnCardPhase::Failed,
+        );
+        return Ok(response);
     }
 
     let resume = session.cli_session_id.clone();
@@ -485,13 +541,14 @@ async fn send_message(
     let session_id = session.id;
     let seen: Arc<Mutex<Vec<TurnEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_emit = Arc::clone(&seen);
+    let app_for_events = app.clone();
     let on_event = move |event: &TurnEvent| {
         let mut stored = event.clone();
         stored.preview = redact_secrets(&stored.preview);
         if let Ok(mut guard) = seen_emit.lock() {
             guard.push(stored.clone());
         }
-        let _ = app.emit(TURN_EVENT, turn_event_payload(session_id, &stored));
+        let _ = app_for_events.emit(TURN_EVENT, turn_event_payload(session_id, &stored));
     };
 
     let run = cli::run_claude_managed(
@@ -562,6 +619,18 @@ async fn send_message(
             let assistant_turn = turn.clone();
             session.updated_at = Utc::now();
             state.store.save_session(&session).map_err(err)?;
+            note_turn_card(
+                &state,
+                &app,
+                &session.cwd,
+                pending_id,
+                &card_title,
+                if is_cli_error {
+                    TurnCardPhase::Failed
+                } else {
+                    TurnCardPhase::Done
+                },
+            );
 
             if is_cli_error {
                 // Still return session so UI can show the error bubble;
@@ -573,22 +642,44 @@ async fn send_message(
                 assistant_turn,
             })
         }
-        Err(cli::CliError::Cancelled) => fail_pending(
-            &state,
-            session,
-            pending_id,
-            "Cancelled".into(),
-            None,
-            seen_events(&seen),
-        ),
-        Err(e) => fail_pending(
-            &state,
-            session,
-            pending_id,
-            e.to_string(),
-            None,
-            seen_events(&seen),
-        ),
+        Err(cli::CliError::Cancelled) => {
+            let response = fail_pending(
+                &state,
+                session,
+                pending_id,
+                "Cancelled".into(),
+                None,
+                seen_events(&seen),
+            )?;
+            note_turn_card(
+                &state,
+                &app,
+                &response.session.cwd,
+                pending_id,
+                &card_title,
+                TurnCardPhase::Failed,
+            );
+            Ok(response)
+        }
+        Err(e) => {
+            let response = fail_pending(
+                &state,
+                session,
+                pending_id,
+                e.to_string(),
+                None,
+                seen_events(&seen),
+            )?;
+            note_turn_card(
+                &state,
+                &app,
+                &response.session.cwd,
+                pending_id,
+                &card_title,
+                TurnCardPhase::Failed,
+            );
+            Ok(response)
+        }
     }
 }
 
@@ -640,6 +731,26 @@ fn list_project_dir(
 ) -> Result<ProjectDirListing, String> {
     let session = load_session(&state, session_id)?;
     project_file::list_in_project(Path::new(&session.cwd), &path)
+}
+
+/// Newest project files with a short snippet. The snippet is not stored on the session.
+#[tauri::command]
+fn recent_project_files(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+) -> Result<Vec<RecentProjectFile>, String> {
+    let session = load_session(&state, session_id)?;
+    project_file::recent_in_project(Path::new(&session.cwd))
+}
+
+/// Project files for the open-file button. Paths only; bodies stay on disk.
+#[tauri::command]
+fn list_project_files(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+) -> Result<ProjectFileIndex, String> {
+    let session = load_session(&state, session_id)?;
+    project_file::index_in_project(Path::new(&session.cwd))
 }
 
 /// Paths from an answer that are files inside the session project. No file bodies.
@@ -924,6 +1035,8 @@ pub fn run() {
             read_project_file,
             write_project_file,
             list_project_dir,
+            recent_project_files,
+            list_project_files,
             locate_project_files,
             get_project_workspace,
             save_project_workspace,
@@ -946,6 +1059,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_title_uses_the_first_line() {
+        assert_eq!(card_title("  Fix the board  \nmore"), "Fix the board");
+        let long = "가".repeat(200);
+        let title = card_title(&long);
+        assert_eq!(title.chars().count(), 121);
+        assert!(title.ends_with('…'));
+    }
 
     fn turn(cost: Option<f64>) -> GuiTurn {
         let now = Utc::now();
