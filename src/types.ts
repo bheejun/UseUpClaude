@@ -21,6 +21,18 @@ export interface ProjectFileView {
   truncated: boolean;
 }
 
+export interface ProjectDirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+
+export interface ProjectDirListing {
+  path: string;
+  entries: ProjectDirEntry[];
+  truncated: boolean;
+}
+
 export interface AppSettings {
   claudeBinaryPath: string | null;
   defaultCwd: string | null;

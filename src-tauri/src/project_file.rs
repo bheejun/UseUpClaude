@@ -1,10 +1,13 @@
-use crate::models::{ProjectFileKind, ProjectFileView};
+use crate::models::{ProjectDirEntry, ProjectDirListing, ProjectFileKind, ProjectFileView};
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 
 /// Bytes kept for a panel read. The session file never stores this body.
 const PANEL_MAX_BYTES: usize = 512 * 1024;
+
+/// Children returned for one folder. The rest stay on disk until the next listing.
+const DIR_LIST_LIMIT: usize = 400;
 
 const MARKDOWN_EXT: &[&str] = &["md", "markdown", "mdx", "mdown"];
 
@@ -61,6 +64,89 @@ pub(crate) fn write_in_project(cwd: &Path, raw_path: &str, content: &str) -> Res
     }
     std::fs::write(&full, content).map_err(|_| "write failed".to_string())?;
     Ok(())
+}
+
+/// One level of `raw` inside `cwd`. An empty path lists the project folder itself.
+/// Symlinks and junctions that leave the folder are omitted. No file bodies.
+pub(crate) fn list_in_project(cwd: &Path, raw_path: &str) -> Result<ProjectDirListing, String> {
+    let root = cwd
+        .canonicalize()
+        .map_err(|_| "project folder is missing".to_string())?;
+    let trimmed = raw_path.trim();
+    let dir = if trimmed.is_empty() || trimmed == "." {
+        root.clone()
+    } else {
+        let full = resolve_inside(cwd, trimmed)?;
+        if !full.is_dir() {
+            return Err("not a directory".into());
+        }
+        full
+    };
+    let rel = relative_to(&root, &dir)?;
+    let mut entries = Vec::new();
+    let reader = std::fs::read_dir(&dir).map_err(|_| "read failed".to_string())?;
+    for item in reader {
+        let item = item.map_err(|_| "read failed".to_string())?;
+        let Some(name) = item.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains(['/', '\\'])
+            || name.chars().any(|ch| ch.is_control())
+        {
+            continue;
+        }
+        let Ok(real) = item.path().canonicalize() else {
+            continue;
+        };
+        if !starts_inside(&real, &root) {
+            continue;
+        }
+        let path = relative_to(&root, &real)?;
+        entries.push(ProjectDirEntry {
+            name,
+            path,
+            is_dir: real.is_dir(),
+        });
+    }
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    let truncated = entries.len() > DIR_LIST_LIMIT;
+    entries.truncate(DIR_LIST_LIMIT);
+    Ok(ProjectDirListing {
+        path: rel,
+        entries,
+        truncated,
+    })
+}
+
+fn relative_to(root: &Path, path: &Path) -> Result<String, String> {
+    let root = strip_verbatim(root);
+    let path = strip_verbatim(path);
+    if path == root {
+        return Ok(String::new());
+    }
+    let rel = path
+        .strip_prefix(&root)
+        .map_err(|_| "outside project".to_string())?;
+    let mut parts = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            _ => return Err("outside project".into()),
+        }
+    }
+    if parts.is_empty() {
+        Err("outside project".into())
+    } else {
+        Ok(parts.join("/"))
+    }
 }
 
 /// Whether `raw` is a file inside `cwd`. Does not read the body.
@@ -348,6 +434,65 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn list_is_one_level_inside_the_project_and_has_no_body() {
+        let root = scratch();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("README.md"), "hi").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+
+        let top = list_in_project(&root, "").unwrap();
+        assert_eq!(top.path, "");
+        assert!(!top.truncated);
+        let names: Vec<_> = top.entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["empty", "src", "b.txt", "README.md"]);
+        assert!(top.entries.iter().take(2).all(|entry| entry.is_dir));
+        assert!(top.entries.iter().skip(2).all(|entry| !entry.is_dir));
+        assert!(top.entries.iter().all(|entry| entry.name != "main.rs"));
+        let readme = top
+            .entries
+            .iter()
+            .find(|entry| entry.name == "README.md")
+            .unwrap();
+        assert_eq!(readme.path, "README.md");
+        assert_eq!(
+            read_in_project(&root, &readme.path).unwrap().content.as_deref(),
+            Some("hi")
+        );
+
+        let nested = list_in_project(&root, "src").unwrap();
+        assert_eq!(nested.path, "src");
+        assert_eq!(nested.entries.len(), 1);
+        assert_eq!(nested.entries[0].name, "main.rs");
+        assert_eq!(nested.entries[0].path, "src/main.rs");
+        assert!(!nested.entries[0].is_dir);
+        let empty = list_in_project(&root, "empty").unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(!empty.truncated);
+
+        assert!(list_in_project(&root, "README.md").is_err());
+        assert!(list_in_project(&root, "../").is_err());
+        let outside = scratch();
+        fs::write(outside.join("secret.txt"), "nope").unwrap();
+        assert!(list_in_project(&root, outside.to_str().unwrap()).is_err());
+        assert!(list_in_project(&root, ".").unwrap().entries.len() == top.entries.len());
+
+        let many = scratch();
+        for index in 0..(DIR_LIST_LIMIT + 1) {
+            fs::write(many.join(format!("f{index:04}.txt")), "x").unwrap();
+        }
+        let capped = list_in_project(&many, "").unwrap();
+        assert!(capped.truncated);
+        assert_eq!(capped.entries.len(), DIR_LIST_LIMIT);
+        assert!(capped.entries.iter().all(|entry| entry.path.ends_with(".txt")));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&many);
+    }
+
     #[cfg(windows)]
     #[test]
     fn junction_name_still_reads_and_an_outside_junction_does_not() {
@@ -368,6 +513,9 @@ mod tests {
         junction(&leak, &outside);
         assert!(read_in_project(&real, leak.join("secret.txt").to_str().unwrap()).is_err());
         assert!(read_in_project(&link, "leak/secret.txt").is_err());
+        let listed = list_in_project(&real, "").unwrap();
+        assert!(listed.entries.iter().all(|entry| entry.name != "leak"));
+        assert!(list_in_project(&real, "leak").is_err());
 
         let _ = fs::remove_dir(&leak);
         let _ = fs::remove_dir(&link);
@@ -397,7 +545,14 @@ mod tests {
         let outside = scratch();
         fs::write(outside.join("secret.txt"), "nope").unwrap();
         symlink(outside.join("secret.txt"), root.join("leak.txt")).unwrap();
+        symlink(&outside, root.join("leak-dir")).unwrap();
         assert!(read_in_project(&root, "leak.txt").is_err());
+        let listed = list_in_project(&root, "").unwrap();
+        assert!(listed
+            .entries
+            .iter()
+            .all(|entry| entry.name != "leak.txt" && entry.name != "leak-dir"));
+        assert!(list_in_project(&root, "leak-dir").is_err());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
     }

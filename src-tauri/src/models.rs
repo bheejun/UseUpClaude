@@ -82,6 +82,24 @@ pub struct ProjectFileView {
     pub truncated: bool,
 }
 
+/// One child of a project folder. Names and paths only; the body stays on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// One level of the session project folder. This is not stored on the session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDirListing {
+    pub path: String,
+    pub entries: Vec<ProjectDirEntry>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiTurn {

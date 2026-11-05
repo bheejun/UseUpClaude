@@ -630,6 +630,17 @@ fn write_project_file(
     project_file::write_in_project(Path::new(&session.cwd), &path, &content)
 }
 
+/// One folder level inside the session project. No file bodies.
+#[tauri::command]
+fn list_project_dir(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    path: String,
+) -> Result<ProjectDirListing, String> {
+    let session = load_session(&state, session_id)?;
+    project_file::list_in_project(Path::new(&session.cwd), &path)
+}
+
 /// Paths from an answer that are files inside the session project. No file bodies.
 #[tauri::command]
 fn locate_project_files(
@@ -889,6 +900,7 @@ pub fn run() {
             get_session,
             read_project_file,
             write_project_file,
+            list_project_dir,
             locate_project_files,
             set_session_model,
             set_session_effort,

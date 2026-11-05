@@ -6,6 +6,7 @@ import type {
   DiscoveredProject,
   GuiSession,
   KeyStatus,
+  ProjectDirListing,
   ProjectFileView,
   ModelCatalog,
   ProjectSkill,
@@ -37,6 +38,8 @@ export const api = {
     invoke<ProjectFileView>("read_project_file", { sessionId, path }),
   writeProjectFile: (sessionId: string, path: string, content: string) =>
     invoke<void>("write_project_file", { sessionId, path, content }),
+  listProjectDir: (sessionId: string, path: string) =>
+    invoke<ProjectDirListing>("list_project_dir", { sessionId, path }),
   locateProjectFiles: (sessionId: string, paths: string[]) =>
     invoke<string[]>("locate_project_files", { sessionId, paths }),
   deleteSession: (id: string) => invoke<void>("delete_session", { id }),
