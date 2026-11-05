@@ -14,6 +14,8 @@ export type Bubble = {
   costUsd: number | null;
   finishedAt?: string | null;
   events?: TurnEvent[];
+  /** Not on the current tip→root resume path. */
+  offMainline?: boolean;
 };
 
 type ToolRow = {
@@ -323,8 +325,16 @@ function ChatBubble({
         {mine ? <User className="size-3.5" /> : <Bot className="size-3.5" />}
       </div>
       <div className={cn("min-w-0 max-w-[min(40rem,calc(100%-2.5rem))]", mine && "text-right")}>
-        <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          {label}
+        <div
+          className={cn(
+            "mb-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground",
+            mine && "justify-end",
+          )}
+        >
+          <span>{label}</span>
+          {bubble.offMainline ? (
+            <span className="normal-case tracking-normal text-amber-200/80">{t("branchOther")}</span>
+          ) : null}
         </div>
         {events.length > 0 && <ToolEvents events={events} />}
         {showBody && (

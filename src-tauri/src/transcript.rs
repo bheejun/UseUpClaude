@@ -157,34 +157,43 @@ fn resolve_tip_from(parsed: &ParsedJsonl) -> Option<SessionTip> {
     })
 }
 
-/// Import user/assistant text along the mainline from root → tip.
+/// Import visible user/assistant text from the whole JSONL tree (every branch).
 /// Skips tool-result users, meta lines, and sidechains. Does not invent text.
+/// Resume tip is still resolved separately (`last-prompt` / newest leaf).
 pub fn import_mainline_turns(path: &Path) -> (Option<SessionTip>, Vec<GuiTurn>) {
     let Some(parsed) = parse_jsonl(path) else {
         return (None, Vec::new());
     };
     let tip = resolve_tip_from(&parsed);
-    let Some(tip) = tip else {
-        return (None, Vec::new());
-    };
-    let chain = walk_to_root(&parsed.nodes, &tip.leaf_uuid);
+    let mainline: HashSet<String> = tip
+        .as_ref()
+        .map(|t| walk_to_root(&parsed.nodes, &t.leaf_uuid).into_iter().collect())
+        .unwrap_or_default();
+    let mut nodes: Vec<&Node> = parsed
+        .nodes
+        .values()
+        .filter(|node| !node.is_sidechain && !node.is_meta)
+        .filter(|node| node.role.is_some())
+        .filter(|node| {
+            node.text
+                .as_ref()
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .collect();
+    nodes.sort_by(|a, b| {
+        let ta = a.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        let tb = b.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        ta.cmp(&tb).then_with(|| a.uuid.cmp(&b.uuid))
+    });
     let mut turns = Vec::new();
-    for uuid in chain {
-        let Some(node) = parsed.nodes.get(&uuid) else {
-            continue;
-        };
-        if node.is_sidechain || node.is_meta {
-            continue;
-        }
+    for node in nodes {
         let Some(role) = node.role.clone() else {
             continue;
         };
         let Some(text) = node.text.as_ref().map(|t| t.trim()).filter(|t| !t.is_empty()) else {
             continue;
         };
-        // Prefer the last assistant text in a tool loop: drop prior assistant
-        // bubbles that only preceded tool_use when the next chain step is a
-        // tool-result user. Simpler: keep every visible text; GUI can show it.
         let started = node.timestamp.unwrap_or_else(Utc::now);
         let exit_code = if role == TurnRole::Assistant {
             Some(0)
@@ -201,12 +210,118 @@ pub fn import_mainline_turns(path: &Path) -> (Option<SessionTip>, Vec<GuiTurn>) 
             status: TurnStatus::Done,
             cost_usd: None,
             events: Vec::new(),
+            cli_uuid: Some(node.uuid.clone()),
+            off_mainline: !mainline.is_empty() && !mainline.contains(&node.uuid),
         });
         if turns.len() >= MAX_IMPORT_TURNS {
             break;
         }
     }
-    (Some(tip), turns)
+    (tip, turns)
+}
+
+const MERGE_TIME_SLACK_SECS: i64 = 120;
+
+/// Merge JSONL imports with AppData GUI turns. Prefer `cli_uuid`, else
+/// role+content+time. Keep unmatched GUI-only history; never invent text.
+fn merge_gui_turns(existing: &[GuiTurn], imported: Vec<GuiTurn>) -> Vec<GuiTurn> {
+    if existing.is_empty() {
+        return imported;
+    }
+    if imported.is_empty() {
+        return existing.to_vec();
+    }
+
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut by_cli: HashMap<&str, usize> = HashMap::new();
+    for (idx, turn) in existing.iter().enumerate() {
+        if let Some(cli) = turn.cli_uuid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            by_cli.entry(cli).or_insert(idx);
+        }
+    }
+
+    let mut merged = Vec::with_capacity(existing.len().saturating_add(imported.len()));
+    for imp in imported {
+        let match_idx = imp
+            .cli_uuid
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|cli| by_cli.get(cli).copied())
+            .filter(|idx| !used.contains(idx))
+            .or_else(|| find_content_time_match(existing, &imp, &used));
+
+        if let Some(idx) = match_idx {
+            used.insert(idx);
+            let mut kept = existing[idx].clone();
+            kept.cli_uuid = imp.cli_uuid.or(kept.cli_uuid);
+            kept.off_mainline = imp.off_mainline;
+            // CLI timestamps are authoritative for resume display order.
+            kept.started_at = imp.started_at;
+            if kept.finished_at.is_none() {
+                kept.finished_at = imp.finished_at;
+            }
+            // Keep existing content (repairs / GUI text); do not invent.
+            if kept.content.trim().is_empty() && !imp.content.trim().is_empty() {
+                kept.content = imp.content;
+            }
+            merged.push(kept);
+        } else {
+            merged.push(imp);
+        }
+    }
+
+    for (idx, turn) in existing.iter().enumerate() {
+        if used.contains(&idx) {
+            continue;
+        }
+        merged.push(turn.clone());
+    }
+
+    merged.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.cli_uuid.cmp(&b.cli_uuid))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    if merged.len() > MAX_IMPORT_TURNS {
+        // Prefer newest settled history when capping.
+        let skip = merged.len() - MAX_IMPORT_TURNS;
+        merged = merged.split_off(skip);
+    }
+    merged
+}
+
+fn find_content_time_match(
+    existing: &[GuiTurn],
+    imported: &GuiTurn,
+    used: &HashSet<usize>,
+) -> Option<usize> {
+    let want = imported.content.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let mut best: Option<(i64, usize)> = None;
+    for (idx, turn) in existing.iter().enumerate() {
+        if used.contains(&idx) {
+            continue;
+        }
+        if turn.role != imported.role {
+            continue;
+        }
+        if turn.content.trim() != want {
+            continue;
+        }
+        let delta = (turn.started_at - imported.started_at).num_seconds().abs();
+        if delta > MERGE_TIME_SLACK_SECS {
+            continue;
+        }
+        match best {
+            Some((best_delta, _)) if best_delta <= delta => {}
+            _ => best = Some((delta, idx)),
+        }
+    }
+    best.map(|(_, idx)| idx)
 }
 
 /// Update `cli_tip_uuid` from the JSONL tip without rewriting GUI turns.
@@ -231,9 +346,10 @@ pub fn refresh_tip_uuid(session: &mut crate::models::GuiSession) -> bool {
     true
 }
 
-/// Sync GUI display turns from the Claude Code tip path when the tip moved or
-/// the thread is empty. Keeps pending/failed-in-flight turns. Never deletes the
-/// GuiSession file.
+/// Sync GUI display turns from the Claude Code JSONL tree when the tip moved,
+/// the thread is empty, or imported branch turns are missing. Merges with
+/// existing AppData turns (does not wipe UseUpClaude-only history). Keeps
+/// pending turns. Never deletes the GuiSession file. Resume still uses tip.
 pub fn sync_gui_from_cli(session: &mut crate::models::GuiSession) -> bool {
     let Some(cli_id) = session.cli_session_id.as_deref().map(str::trim) else {
         return false;
@@ -268,7 +384,20 @@ pub fn sync_gui_from_cli(session: &mut crate::models::GuiSession) -> bool {
         return false;
     }
 
-    if !tip_changed && !empty {
+    let existing_cli: HashSet<&str> = session
+        .turns
+        .iter()
+        .filter_map(|t| t.cli_uuid.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .collect();
+    let missing_import = imported.iter().any(|t| {
+        t.cli_uuid
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some_and(|cli| !existing_cli.contains(cli))
+    });
+
+    if !tip_changed && !empty && !missing_import {
         if session.cli_tip_uuid.is_none() {
             session.cli_tip_uuid = Some(tip.leaf_uuid);
             return true;
@@ -280,15 +409,12 @@ pub fn sync_gui_from_cli(session: &mut crate::models::GuiSession) -> bool {
         return tip_changed;
     }
 
-    // Tip moved or thread was empty: replace settled display turns with the
-    // mainline import. GuiSession files are never deleted.
-    if empty || tip_changed {
-        session.turns = imported;
-        session.cli_tip_uuid = Some(tip.leaf_uuid);
-        session.updated_at = Utc::now();
-        return true;
-    }
-    false
+    // Tip moved, thread empty, or new branch turns appeared: merge JSONL import
+    // with AppData. GuiSession files are never deleted.
+    session.turns = merge_gui_turns(&session.turns, imported);
+    session.cli_tip_uuid = Some(tip.leaf_uuid);
+    session.updated_at = Utc::now();
+    true
 }
 
 struct ParsedJsonl {
@@ -559,8 +685,25 @@ mod tests {
         assert_eq!(tip.source, TipSource::LastPrompt);
         let (_tip, turns) = import_mainline_turns(&path);
         let texts: Vec<&str> = turns.iter().map(|t| t.content.as_str()).collect();
-        assert_eq!(texts, vec!["first", "answer1", "branch-b", "new tip"]);
-        assert!(!texts.iter().any(|t| *t == "old tip" || *t == "branch-a"));
+        assert_eq!(
+            texts,
+            vec![
+                "first",
+                "answer1",
+                "branch-a",
+                "old tip",
+                "branch-b",
+                "new tip"
+            ]
+        );
+        let by_content: HashMap<&str, &GuiTurn> =
+            turns.iter().map(|t| (t.content.as_str(), t)).collect();
+        assert!(!by_content["first"].off_mainline);
+        assert!(!by_content["branch-b"].off_mainline);
+        assert!(!by_content["new tip"].off_mainline);
+        assert!(by_content["branch-a"].off_mainline);
+        assert!(by_content["old tip"].off_mainline);
+        assert_eq!(by_content["branch-a"].cli_uuid.as_deref(), Some("u2"));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -583,8 +726,14 @@ mod tests {
                 .iter()
                 .map(|t| t.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["root", "base", "new", "new leaf"]
+            vec!["root", "base", "old", "old leaf", "new", "new leaf"]
         );
+        let off: Vec<&str> = turns
+            .iter()
+            .filter(|t| t.off_mainline)
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(off, vec!["old", "old leaf"]);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -632,5 +781,150 @@ mod tests {
         let (_tip, turns) = import_mainline_turns(&path);
         assert_eq!(turns[0].content, "final");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_keeps_gui_only_and_matches_cli_uuid() {
+        let t0 = DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = DateTime::parse_from_rfc3339("2026-01-01T00:00:01.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let gui_only_id = Uuid::new_v4();
+        let existing = vec![
+            GuiTurn {
+                id: Uuid::new_v4(),
+                role: TurnRole::User,
+                content: "from-cli".into(),
+                exit_code: None,
+                started_at: t0,
+                finished_at: Some(t0),
+                status: TurnStatus::Done,
+                cost_usd: None,
+                events: Vec::new(),
+                cli_uuid: Some("u1".into()),
+                off_mainline: false,
+            },
+            GuiTurn {
+                id: gui_only_id,
+                role: TurnRole::User,
+                content: "gui-only note".into(),
+                exit_code: None,
+                started_at: t0 + chrono::Duration::seconds(30),
+                finished_at: Some(t0 + chrono::Duration::seconds(30)),
+                status: TurnStatus::Done,
+                cost_usd: None,
+                events: Vec::new(),
+                cli_uuid: None,
+                off_mainline: false,
+            },
+            GuiTurn {
+                id: Uuid::new_v4(),
+                role: TurnRole::Assistant,
+                content: "answer".into(),
+                exit_code: Some(0),
+                started_at: t1,
+                finished_at: Some(t1),
+                status: TurnStatus::Done,
+                cost_usd: Some(0.42),
+                events: Vec::new(),
+                cli_uuid: Some("a1".into()),
+                off_mainline: false,
+            },
+        ];
+        let imported = vec![
+            GuiTurn {
+                id: Uuid::new_v4(),
+                role: TurnRole::User,
+                content: "from-cli".into(),
+                exit_code: None,
+                started_at: t0,
+                finished_at: Some(t0),
+                status: TurnStatus::Done,
+                cost_usd: None,
+                events: Vec::new(),
+                cli_uuid: Some("u1".into()),
+                off_mainline: false,
+            },
+            GuiTurn {
+                id: Uuid::new_v4(),
+                role: TurnRole::Assistant,
+                content: "answer".into(),
+                exit_code: Some(0),
+                started_at: t1,
+                finished_at: Some(t1),
+                status: TurnStatus::Done,
+                cost_usd: None,
+                events: Vec::new(),
+                cli_uuid: Some("a1".into()),
+                off_mainline: false,
+            },
+            GuiTurn {
+                id: Uuid::new_v4(),
+                role: TurnRole::User,
+                content: "other-branch".into(),
+                exit_code: None,
+                started_at: t0 + chrono::Duration::seconds(2),
+                finished_at: Some(t0 + chrono::Duration::seconds(2)),
+                status: TurnStatus::Done,
+                cost_usd: None,
+                events: Vec::new(),
+                cli_uuid: Some("u2".into()),
+                off_mainline: true,
+            },
+        ];
+        let merged = merge_gui_turns(&existing, imported);
+        let texts: Vec<&str> = merged.iter().map(|t| t.content.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["from-cli", "answer", "other-branch", "gui-only note"]
+        );
+        let answer = merged.iter().find(|t| t.content == "answer").unwrap();
+        assert_eq!(answer.cost_usd, Some(0.42));
+        assert!(merged.iter().any(|t| t.id == gui_only_id));
+        assert!(merged
+            .iter()
+            .any(|t| t.content == "other-branch" && t.off_mainline));
+    }
+
+    #[test]
+    fn merge_matches_by_content_and_time_without_cli_uuid() {
+        let t0 = DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let gui_id = Uuid::new_v4();
+        let existing = vec![GuiTurn {
+            id: gui_id,
+            role: TurnRole::User,
+            content: "hello".into(),
+            exit_code: None,
+            started_at: t0 + chrono::Duration::seconds(5),
+            finished_at: Some(t0 + chrono::Duration::seconds(5)),
+            status: TurnStatus::Done,
+            cost_usd: None,
+            events: Vec::new(),
+            cli_uuid: None,
+            off_mainline: false,
+        }];
+        let imported = vec![GuiTurn {
+            id: Uuid::new_v4(),
+            role: TurnRole::User,
+            content: "hello".into(),
+            exit_code: None,
+            started_at: t0,
+            finished_at: Some(t0),
+            status: TurnStatus::Done,
+            cost_usd: None,
+            events: Vec::new(),
+            cli_uuid: Some("u-hello".into()),
+            off_mainline: true,
+        }];
+        let merged = merge_gui_turns(&existing, imported);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, gui_id);
+        assert_eq!(merged[0].cli_uuid.as_deref(), Some("u-hello"));
+        assert!(merged[0].off_mainline);
+        assert_eq!(merged[0].started_at, t0);
     }
 }
