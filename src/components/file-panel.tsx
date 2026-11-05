@@ -34,6 +34,10 @@ export function FilePanel({
   const [width, setWidth] = useState(352);
   const widthRef = useRef(width);
   widthRef.current = width;
+  const panelRef = useRef<HTMLElement>(null);
+  const [treeHeight, setTreeHeight] = useState(220);
+  const treeHeightRef = useRef(treeHeight);
+  treeHeightRef.current = treeHeight;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -127,6 +131,45 @@ export function FilePanel({
     return Math.min(max, Math.max(280, next));
   };
 
+  const clampTreeHeight = (next: number) => {
+    const panel = panelRef.current?.clientHeight ?? 0;
+    const rounded = Math.max(96, Math.round(next));
+    if (panel < 240) return rounded;
+    return Math.min(panel - 160, rounded);
+  };
+
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const fit = () => {
+      setTreeHeight((current) => {
+        const next = clampTreeHeight(current);
+        return next === current ? current : next;
+      });
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, []);
+
+  const onSplitPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const startY = event.clientY;
+    const startH = treeHeightRef.current;
+    const move = (ev: PointerEvent) => {
+      setTreeHeight(clampTreeHeight(startH + (ev.clientY - startY)));
+    };
+    const up = (ev: PointerEvent) => {
+      if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  };
+
   const onResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (window.innerWidth < 821) return;
     event.preventDefault();
@@ -179,6 +222,7 @@ export function FilePanel({
 
   return (
     <aside
+      ref={panelRef}
       className="file-panel absolute inset-y-0 right-0 z-20 flex shrink-0 flex-col border-l border-border bg-[#101318] shadow-xl min-[821px]:relative min-[821px]:inset-auto min-[821px]:z-auto min-[821px]:shadow-none"
       style={{ "--file-panel-width": `${width}px` } as CSSProperties}
       aria-label={t("projectFolder")}
@@ -209,7 +253,12 @@ export function FilePanel({
           <X className="size-3.5" />
         </button>
       </div>
-      <div className="max-h-[40%] shrink-0 overflow-y-auto border-b border-border py-1" role="tree" aria-label={t("projectFolder")}>
+      <div
+        className="shrink-0 overflow-y-auto py-1"
+        style={{ height: treeHeight }}
+        role="tree"
+        aria-label={t("projectFolder")}
+      >
         <div role="treeitem" aria-expanded={rootOpen} aria-level={1}>
           <button
             type="button"
@@ -236,6 +285,28 @@ export function FilePanel({
             </div>
           )}
         </div>
+      </div>
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={t("resizeFileSplit")}
+        aria-valuemin={96}
+        aria-valuenow={treeHeight}
+        tabIndex={0}
+        className="relative z-10 h-2 shrink-0 cursor-row-resize hover:bg-primary/40"
+        onPointerDown={onSplitPointerDown}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setTreeHeight((current) => clampTreeHeight(current - 24));
+          }
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setTreeHeight((current) => clampTreeHeight(current + 24));
+          }
+        }}
+      >
+        <div className="absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-border" />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {!activePath && <p className="text-[13px] leading-relaxed text-muted-foreground">{t("projectTreeHint")}</p>}

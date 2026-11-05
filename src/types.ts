@@ -33,6 +33,27 @@ export interface ProjectDirListing {
   truncated: boolean;
 }
 
+export type BoardStatus = "progress" | "done";
+
+export interface BoardCard {
+  id: string;
+  number: number;
+  title: string;
+  tag: string;
+  status: BoardStatus;
+}
+
+export interface LibraryDoc {
+  id: string;
+  title: string;
+  body: string;
+}
+
+export interface ProjectWorkspace {
+  cards: BoardCard[];
+  docs: LibraryDoc[];
+}
+
 export interface AppSettings {
   claudeBinaryPath: string | null;
   defaultCwd: string | null;

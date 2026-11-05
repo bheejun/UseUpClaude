@@ -279,3 +279,35 @@ pub struct CliEnvelope {
     pub total_cost_usd: Option<f64>,
     pub is_error: bool,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardStatus {
+    Progress,
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardCard {
+    pub id: Uuid,
+    pub number: u32,
+    pub title: String,
+    pub tag: String,
+    pub status: BoardStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDoc {
+    pub id: Uuid,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWorkspace {
+    pub cards: Vec<BoardCard>,
+    pub docs: Vec<LibraryDoc>,
+}
