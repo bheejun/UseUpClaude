@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { Folder, Plus, Settings, Terminal } from "lucide-react";
+import { FileText, Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
 import { ChatThread, type Bubble } from "@/components/chat-thread";
+import { FilePanel } from "@/components/file-panel";
+import { producedFilePaths } from "@/produced-files";
 import { DiscoverDialog } from "@/components/discover-dialog";
 import { NewChatDialog } from "@/components/new-chat-dialog";
 import { SessionCostsDialog } from "@/components/session-costs-dialog";
@@ -315,14 +317,8 @@ export default function App() {
     let unlisten: UnlistenFn | undefined;
     try {
       unlisten = await listen<TurnEventPayload>("turn-event", (message) => {
-        if (message.payload.sessionId !== sessionId || !busyRef.current.has(sessionId)) return;
-        const event: TurnEvent = {
-          kind: message.payload.kind,
-          toolUseId: message.payload.toolUseId,
-          name: message.payload.name,
-          isError: message.payload.isError,
-          preview: message.payload.preview,
-        };
+        const { sessionId: eventSession, ...event } = message.payload;
+        if (eventSession !== sessionId || !busyRef.current.has(sessionId)) return;
         const next = [...(liveEvents.current.get(sessionId) ?? []), event];
         liveEvents.current.set(sessionId, next);
         setActive((current) => {
@@ -403,6 +399,13 @@ export default function App() {
   }, [visible]);
 
   const sessionBusy = !!active && busyIds.has(active.id);
+  const producedPaths = useMemo(
+    () => producedFilePaths((active?.turns ?? []).flatMap((turn) => turn.events ?? [])),
+    [active],
+  );
+  const fileSignature = `${active?.id ?? ""}:${producedPaths.join("\0")}`;
+  const [dismissedFiles, setDismissedFiles] = useState<string | null>(null);
+  const filesOpen = producedPaths.length > 0 && dismissedFiles !== fileSignature;
 
   useEffect(() => {
     if (!active || sessionBusy || !active.fastMode || supportsFastMode(active.model)) return;
@@ -601,6 +604,20 @@ export default function App() {
                   {detect?.found ? t("cliOk") : t("cliMissing")}
                 </Badge>
                 <Badge>{t("tools", { preset: active?.allowedToolsPreset ?? settings.allowedToolsPreset })}</Badge>
+                {producedPaths.length > 0 && (
+                  <Button
+                    type="button"
+                    variant={filesOpen ? "secondary" : "outline"}
+                    size="sm"
+                    aria-pressed={filesOpen}
+                    aria-label={filesOpen ? t("closeFilePanel") : t("showProducedFiles")}
+                    onClick={() => setDismissedFiles(filesOpen ? fileSignature : null)}
+                  >
+                    <FileText className="size-3.5" />
+                    {t("producedFiles")}
+                    <span className="font-mono text-[10px]">{producedPaths.length}</span>
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="icon"
@@ -613,6 +630,8 @@ export default function App() {
               </div>
             </header>
 
+            <div className="relative flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto">
               {!active ? (
                 <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center px-6 text-center">
@@ -827,6 +846,17 @@ export default function App() {
                 {t("composerHint")}
               </p>
             </form>
+            </div>
+            {filesOpen && active && (
+              <FilePanel
+                key={active.id}
+                sessionId={active.id}
+                cwd={active.cwd}
+                paths={producedPaths}
+                onClose={() => setDismissedFiles(fileSignature)}
+              />
+            )}
+            </div>
           </>
         )}
       </section>

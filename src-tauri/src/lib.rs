@@ -2,6 +2,7 @@ mod catalog;
 mod cli;
 mod discover;
 mod models;
+mod project_file;
 mod secrets;
 mod skills;
 mod store;
@@ -11,7 +12,7 @@ use serde::Serialize;
 use cli::{ActiveRun, RunSpec};
 use models::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::AppStore;
 use tauri::{AppHandle, Emitter, State};
@@ -607,6 +608,16 @@ fn data_dir(state: State<'_, AppState>) -> String {
     state.store.data_root().display().to_string()
 }
 
+#[tauri::command]
+fn read_project_file(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    path: String,
+) -> Result<ProjectFileView, String> {
+    let session = load_session(&state, session_id)?;
+    project_file::read_in_project(Path::new(&session.cwd), &path)
+}
+
 fn load_session(state: &AppState, id: Uuid) -> Result<GuiSession, String> {
     let mut session = state.store.get_session(id).map_err(err)?;
     if prepare_session(&mut session) {
@@ -846,6 +857,7 @@ pub fn run() {
             detect_claude,
             list_sessions,
             get_session,
+            read_project_file,
             set_session_model,
             set_session_effort,
             set_session_fast_mode,
@@ -924,6 +936,16 @@ mod tests {
         let turn: GuiTurn = serde_json::from_str(raw).unwrap();
         assert!(turn.events.is_empty());
         assert_eq!(turn.content, "hi");
+        let event: TurnEvent = serde_json::from_str(
+            r#"{"kind":"tool_use","toolUseId":"toolu_1","name":"Write","isError":false,"preview":"{}"}"#,
+        )
+        .unwrap();
+        assert!(event.path.is_none());
+        let with_path: TurnEvent = serde_json::from_str(
+            r#"{"kind":"tool_use","toolUseId":"toolu_2","name":"Edit","isError":false,"preview":"{}","path":"src/main.rs"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_path.path.as_deref(), Some("src/main.rs"));
         let saved = serde_json::to_value(&turn).unwrap();
         assert!(saved["events"].as_array().unwrap().is_empty());
     }
@@ -937,6 +959,7 @@ mod tests {
             name: "Read".into(),
             is_error: true,
             preview: "missing file".into(),
+            path: None,
         };
         let payload = turn_event_payload(session_id, &event);
         assert_eq!(payload.event, event);

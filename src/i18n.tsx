@@ -144,6 +144,14 @@ const en = {
   effortMax: "Max",
   effortHint: "This message's reasoning effort. Default omits --effort.",
   fastMode: "Fast mode (Opus, costs more)",
+  producedFiles: "Files",
+  showProducedFiles: "Show files",
+  closeFilePanel: "Close files",
+  producedFilesHint: "Written or edited in this chat. Choose a path to open it.",
+  filePreviewUnsupported: "This panel can't preview this file.",
+  filePreviewMissing: "Couldn't read this file from the project folder.",
+  filePreviewTruncated: "Showing the start of the file.",
+  filePreviewLoading: "Reading file…",
 } as const;
 
 type Key = keyof typeof en;
@@ -264,6 +272,14 @@ const ko: Dict = {
   effortMax: "최대",
   effortHint: "이 메시지의 추론 노력입니다. 기본값은 --effort를 넣지 않습니다.",
   fastMode: "빠른 모드 (Opus, 비용이 더 듦)",
+  producedFiles: "파일",
+  showProducedFiles: "파일 보기",
+  closeFilePanel: "파일 닫기",
+  producedFilesHint: "이 채팅에서 쓰거나 고친 파일입니다. 경로를 누르면 엽니다.",
+  filePreviewUnsupported: "이 패널에서는 이 파일을 미리 볼 수 없습니다.",
+  filePreviewMissing: "프로젝트 폴더에서 이 파일을 읽지 못했습니다.",
+  filePreviewTruncated: "파일의 앞부분만 보여 줍니다.",
+  filePreviewLoading: "파일을 읽는 중…",
 };
 
 const ja: Dict = {
@@ -381,6 +397,14 @@ const ja: Dict = {
   effortMax: "最大",
   effortHint: "このメッセージの推論エフォートです。既定では --effort を付けません。",
   fastMode: "高速モード（Opus、費用が増えます）",
+  producedFiles: "ファイル",
+  showProducedFiles: "ファイルを表示",
+  closeFilePanel: "ファイルを閉じる",
+  producedFilesHint: "このチャットで作成または編集したファイルです。パスを選ぶと開きます。",
+  filePreviewUnsupported: "このパネルではこのファイルをプレビューできません。",
+  filePreviewMissing: "プロジェクトフォルダからこのファイルを読めませんでした。",
+  filePreviewTruncated: "ファイルの先頭だけを表示しています。",
+  filePreviewLoading: "ファイルを読み込み中…",
 };
 
 const zh: Dict = {
@@ -497,6 +521,14 @@ const zh: Dict = {
   effortMax: "最大",
   effortHint: "这条消息的推理强度。默认不传 --effort。",
   fastMode: "快速模式（Opus，费用更高）",
+  producedFiles: "文件",
+  showProducedFiles: "显示文件",
+  closeFilePanel: "关闭文件",
+  producedFilesHint: "本聊天写入或编辑的文件。点路径即可打开。",
+  filePreviewUnsupported: "此面板无法预览该文件。",
+  filePreviewMissing: "无法从项目文件夹读取此文件。",
+  filePreviewTruncated: "只显示文件开头。",
+  filePreviewLoading: "正在读取文件…",
 };
 
 const es: Dict = {
@@ -614,6 +646,14 @@ const es: Dict = {
   effortMax: "Máximo",
   effortHint: "Esfuerzo de razonamiento de este mensaje. El predeterminado omite --effort.",
   fastMode: "Modo rápido (Opus, cuesta más)",
+  producedFiles: "Archivos",
+  showProducedFiles: "Ver archivos",
+  closeFilePanel: "Cerrar archivos",
+  producedFilesHint: "Escritos o editados en este chat. Elige una ruta para abrirlo.",
+  filePreviewUnsupported: "Este panel no puede previsualizar este archivo.",
+  filePreviewMissing: "No se pudo leer este archivo en la carpeta del proyecto.",
+  filePreviewTruncated: "Se muestra el inicio del archivo.",
+  filePreviewLoading: "Leyendo archivo…",
 };
 
 const DICTS: Record<Locale, Dict> = { en, ko, ja, zh, es };
