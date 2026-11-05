@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { FileText, Folder, Plus, Settings, Terminal } from "lucide-react";
+import { Folder, Plus, Settings, Terminal } from "lucide-react";
 import { api } from "@/api";
 import { folderBase, formatUsd, presentTurn, sumSessionCost } from "@/chat-format";
 import { EffortSelect, ModelSelect, modelListMessage, normalizeEffort, supportsFastMode } from "@/components/model-select";
@@ -405,13 +405,18 @@ export default function App() {
   );
   const fileSignature = `${active?.id ?? ""}:${producedPaths.join("\0")}`;
   const [dismissedFiles, setDismissedFiles] = useState<string | null>(null);
+  const [treeOpenFor, setTreeOpenFor] = useState<string | null>(null);
   const [openedFile, setOpenedFile] = useState<{ sessionId: string; path: string } | null>(null);
   const openedPath = active && openedFile?.sessionId === active.id ? openedFile.path : null;
-  const panelPaths = useMemo(() => {
-    if (openedPath && !producedPaths.includes(openedPath)) return [...producedPaths, openedPath];
-    return producedPaths;
-  }, [openedPath, producedPaths]);
-  const filesOpen = openedPath != null || (producedPaths.length > 0 && dismissedFiles !== fileSignature);
+  const filesOpen =
+    openedPath != null ||
+    (active != null && treeOpenFor === active.id) ||
+    (producedPaths.length > 0 && dismissedFiles !== fileSignature);
+  const closeFilePanel = () => {
+    setOpenedFile(null);
+    setDismissedFiles(fileSignature);
+    setTreeOpenFor(null);
+  };
   const openProjectFile = useCallback(
     (path: string) => {
       if (!active) return;
@@ -630,18 +635,23 @@ export default function App() {
                   {detect?.found ? t("cliOk") : t("cliMissing")}
                 </Badge>
                 <Badge>{t("tools", { preset: active?.allowedToolsPreset ?? settings.allowedToolsPreset })}</Badge>
-                {producedPaths.length > 0 && (
+                {active && (
                   <Button
                     type="button"
                     variant={filesOpen ? "secondary" : "outline"}
                     size="sm"
                     aria-pressed={filesOpen}
-                    aria-label={filesOpen ? t("closeFilePanel") : t("showProducedFiles")}
-                    onClick={() => setDismissedFiles(filesOpen ? fileSignature : null)}
+                    aria-label={filesOpen ? t("closeFilePanel") : t("showProjectFolder")}
+                    onClick={() => {
+                      if (filesOpen) closeFilePanel();
+                      else {
+                        setTreeOpenFor(active.id);
+                        setDismissedFiles(null);
+                      }
+                    }}
                   >
-                    <FileText className="size-3.5" />
-                    {t("producedFiles")}
-                    <span className="font-mono text-[10px]">{producedPaths.length}</span>
+                    <Folder className="size-3.5" />
+                    {t("projectFolder")}
                   </Button>
                 )}
                 <Button
@@ -884,13 +894,9 @@ export default function App() {
                 key={active.id}
                 sessionId={active.id}
                 cwd={active.cwd}
-                paths={panelPaths}
                 activePath={openedPath}
                 onActivePath={choosePanelPath}
-                onClose={() => {
-                  setOpenedFile(null);
-                  setDismissedFiles(fileSignature);
-                }}
+                onClose={closeFilePanel}
               />
             )}
             </div>

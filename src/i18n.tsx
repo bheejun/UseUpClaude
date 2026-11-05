@@ -159,6 +159,14 @@ const en = {
   cancelFileEdit: "Cancel",
   fileSaveFailed: "Couldn't save this file to the project folder.",
   resizeFilePanel: "Resize the file panel",
+  showProjectFolder: "Show the project folder",
+  projectTreeHint: "Choose a file in the project folder.",
+  emptyFolder: "This folder is empty.",
+  folderReadFailed: "Couldn't read this folder.",
+  readingFolder: "Reading folder…",
+  folderListingTruncated: "Showing the first entries in this folder.",
+  expandFolder: "Expand folder",
+  collapseFolder: "Collapse folder",
 } as const;
 
 type Key = keyof typeof en;
@@ -294,6 +302,14 @@ const ko: Dict = {
   cancelFileEdit: "취소",
   fileSaveFailed: "프로젝트 폴더에 이 파일을 저장하지 못했습니다.",
   resizeFilePanel: "파일 패널 너비 조절",
+  showProjectFolder: "프로젝트 폴더 보기",
+  projectTreeHint: "프로젝트 폴더에서 파일을 고르면 엽니다.",
+  emptyFolder: "이 폴더는 비어 있습니다.",
+  folderReadFailed: "이 폴더를 읽지 못했습니다.",
+  readingFolder: "폴더를 읽는 중…",
+  folderListingTruncated: "이 폴더의 앞부분만 표시합니다.",
+  expandFolder: "폴더 펼치기",
+  collapseFolder: "폴더 접기",
 };
 
 const ja: Dict = {
@@ -426,6 +442,14 @@ const ja: Dict = {
   cancelFileEdit: "キャンセル",
   fileSaveFailed: "プロジェクトフォルダにこのファイルを保存できませんでした。",
   resizeFilePanel: "ファイルパネルの幅を変える",
+  showProjectFolder: "プロジェクトフォルダを表示",
+  projectTreeHint: "プロジェクトフォルダのファイルを選ぶと開きます。",
+  emptyFolder: "このフォルダは空です。",
+  folderReadFailed: "このフォルダを読めませんでした。",
+  readingFolder: "フォルダを読み込み中…",
+  folderListingTruncated: "このフォルダの先頭だけを表示しています。",
+  expandFolder: "フォルダを展開",
+  collapseFolder: "フォルダを折りたたむ",
 };
 
 const zh: Dict = {
@@ -557,6 +581,14 @@ const zh: Dict = {
   cancelFileEdit: "取消",
   fileSaveFailed: "未能把此文件保存到项目文件夹。",
   resizeFilePanel: "调整文件面板宽度",
+  showProjectFolder: "显示项目文件夹",
+  projectTreeHint: "在项目文件夹中选择文件即可打开。",
+  emptyFolder: "此文件夹是空的。",
+  folderReadFailed: "无法读取此文件夹。",
+  readingFolder: "正在读取文件夹…",
+  folderListingTruncated: "只显示此文件夹的前面部分。",
+  expandFolder: "展开文件夹",
+  collapseFolder: "折叠文件夹",
 };
 
 const es: Dict = {
@@ -689,6 +721,14 @@ const es: Dict = {
   cancelFileEdit: "Cancelar",
   fileSaveFailed: "No se pudo guardar este archivo en la carpeta del proyecto.",
   resizeFilePanel: "Cambiar el ancho del panel de archivos",
+  showProjectFolder: "Mostrar la carpeta del proyecto",
+  projectTreeHint: "Elige un archivo de la carpeta del proyecto para abrirlo.",
+  emptyFolder: "Esta carpeta está vacía.",
+  folderReadFailed: "No se pudo leer esta carpeta.",
+  readingFolder: "Leyendo carpeta…",
+  folderListingTruncated: "Solo se muestran las primeras entradas de esta carpeta.",
+  expandFolder: "Expandir carpeta",
+  collapseFolder: "Contraer carpeta",
 };
 
 const DICTS: Record<Locale, Dict> = { en, ko, ja, zh, es };

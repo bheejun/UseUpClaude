@@ -1,23 +1,28 @@
-import { X } from "lucide-react";
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { ChevronDown, ChevronRight, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "@/api";
+import { folderBase } from "@/chat-format";
 import { MarkdownMessage } from "@/components/markdown-message";
-import { projectRelativePath } from "@/produced-files";
+import { projectRelativePath, sameProjectFile } from "@/produced-files";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
-import type { ProjectFileView } from "@/types";
+import type { ProjectDirEntry, ProjectFileView } from "@/types";
+
+type Listing = {
+  status: "loading" | "ready" | "error";
+  entries: ProjectDirEntry[];
+  truncated: boolean;
+};
 
 export function FilePanel({
   sessionId,
   cwd,
-  paths,
   activePath,
   onActivePath,
   onClose,
 }: {
   sessionId: string;
   cwd: string;
-  paths: string[];
   activePath: string | null;
   onActivePath: (path: string | null) => void;
   onClose: () => void;
@@ -33,10 +38,56 @@ export function FilePanel({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [listings, setListings] = useState<Record<string, Listing>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
+  const requested = useRef(new Set<string>());
+
+  const loadDir = useCallback(
+    (rel: string) => {
+      if (requested.current.has(rel)) return;
+      requested.current.add(rel);
+      setListings((current) => ({
+        ...current,
+        [rel]: { status: "loading", entries: [], truncated: false },
+      }));
+      void api
+        .listProjectDir(sessionId, rel)
+        .then((listing) => {
+          setListings((current) => ({
+            ...current,
+            [rel]: { status: "ready", entries: listing.entries, truncated: listing.truncated },
+          }));
+        })
+        .catch(() => {
+          setListings((current) => ({
+            ...current,
+            [rel]: { status: "error", entries: [], truncated: false },
+          }));
+        });
+    },
+    [sessionId],
+  );
 
   useEffect(() => {
-    if (activePath && !paths.includes(activePath)) onActivePath(null);
-  }, [activePath, paths, onActivePath]);
+    loadDir("");
+  }, [loadDir]);
+
+  useEffect(() => {
+    if (!activePath) return;
+    const rel = projectRelativePath(activePath, cwd).replace(/\\/g, "/");
+    if (!rel || rel.includes(":") || rel.startsWith("/") || rel.split("/").includes("..")) return;
+    const parts = rel.split("/").filter(Boolean);
+    const parents = [""];
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      parents.push(parts.slice(0, index + 1).join("/"));
+    }
+    setExpanded((current) => {
+      const next = new Set(current);
+      for (const parent of parents) next.add(parent);
+      return next;
+    });
+    for (const parent of parents) loadDir(parent);
+  }, [activePath, cwd, loadDir]);
 
   useEffect(() => {
     if (!activePath) {
@@ -113,11 +164,24 @@ export function FilePanel({
       });
   };
 
+  const toggleDir = (path: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    loadDir(path);
+  };
+
+  const rootOpen = expanded.has("");
+  const rootName = folderBase(cwd);
+
   return (
     <aside
       className="file-panel absolute inset-y-0 right-0 z-20 flex shrink-0 flex-col border-l border-border bg-[#101318] shadow-xl min-[821px]:relative min-[821px]:inset-auto min-[821px]:z-auto min-[821px]:shadow-none"
       style={{ "--file-panel-width": `${width}px` } as CSSProperties}
-      aria-label={t("producedFiles")}
+      aria-label={t("projectFolder")}
     >
       <div
         role="separator"
@@ -133,41 +197,48 @@ export function FilePanel({
         }}
       />
       <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-          {t("producedFiles")}
+        <h3 className="truncate font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground" title={cwd}>
+          {t("projectFolder")}
         </h3>
         <button
           type="button"
-          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           aria-label={t("closeFilePanel")}
           onClick={onClose}
         >
           <X className="size-3.5" />
         </button>
       </div>
-      <ul className="max-h-[40%] shrink-0 overflow-y-auto border-b border-border py-1" aria-label={t("producedFiles")}>
-        {paths.map((path) => {
-          const selected = path === activePath;
-          return (
-            <li key={path}>
-              <button
-                type="button"
-                className={cn(
-                  "block w-full truncate px-3 py-1.5 text-left font-mono text-[12px] hover:bg-accent",
-                  selected ? "bg-accent text-primary" : "text-foreground",
-                )}
-                title={path}
-                aria-current={selected ? "true" : undefined}
-                onClick={() => onActivePath(path)}
-              >
-                {projectRelativePath(path, cwd)}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+      <div className="max-h-[40%] shrink-0 overflow-y-auto border-b border-border py-1" role="tree" aria-label={t("projectFolder")}>
+        <div role="treeitem" aria-expanded={rootOpen} aria-level={1}>
+          <button
+            type="button"
+            className="flex w-full items-center gap-1 px-2 py-1 text-left font-mono text-[12px] hover:bg-accent"
+            title={cwd}
+            aria-label={`${rootOpen ? t("collapseFolder") : t("expandFolder")}: ${rootName}`}
+            onClick={() => toggleDir("")}
+          >
+            {rootOpen ? <ChevronDown className="size-3 shrink-0" /> : <ChevronRight className="size-3 shrink-0" />}
+            <span className="truncate">{rootName}</span>
+          </button>
+          {rootOpen && (
+            <div role="group">
+              <TreeLevel
+                parent=""
+                depth={1}
+                listings={listings}
+                expanded={expanded}
+                activePath={activePath}
+                cwd={cwd}
+                onToggle={toggleDir}
+                onOpenFile={onActivePath}
+              />
+            </div>
+          )}
+        </div>
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {!activePath && <p className="text-[13px] leading-relaxed text-muted-foreground">{t("producedFilesHint")}</p>}
+        {!activePath && <p className="text-[13px] leading-relaxed text-muted-foreground">{t("projectTreeHint")}</p>}
         {activePath && loading && <p className="text-[13px] text-muted-foreground">{t("filePreviewLoading")}</p>}
         {activePath && missing && (
           <p className="text-[13px] leading-relaxed text-muted-foreground">{t("filePreviewMissing")}</p>
@@ -244,5 +315,111 @@ export function FilePanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function TreeLevel({
+  parent,
+  depth,
+  listings,
+  expanded,
+  activePath,
+  cwd,
+  onToggle,
+  onOpenFile,
+}: {
+  parent: string;
+  depth: number;
+  listings: Record<string, Listing>;
+  expanded: Set<string>;
+  activePath: string | null;
+  cwd: string;
+  onToggle: (path: string) => void;
+  onOpenFile: (path: string) => void;
+}) {
+  const { t } = useI18n();
+  const listing = listings[parent];
+  const pad = { paddingLeft: 8 + depth * 14 };
+  if (!listing || listing.status === "loading") {
+    return (
+      <p className="px-2 py-1 text-[12px] text-muted-foreground" style={pad}>
+        {t("readingFolder")}
+      </p>
+    );
+  }
+  if (listing.status === "error") {
+    return (
+      <p className="px-2 py-1 text-[12px] leading-relaxed text-muted-foreground" style={pad}>
+        {t("folderReadFailed")}
+      </p>
+    );
+  }
+  if (listing.entries.length === 0) {
+    return (
+      <p className="px-2 py-1 text-[12px] text-muted-foreground" style={pad}>
+        {t("emptyFolder")}
+      </p>
+    );
+  }
+  return (
+    <>
+      {listing.entries.map((entry) => {
+        if (entry.isDir) {
+          const open = expanded.has(entry.path);
+          return (
+            <div key={entry.path} role="treeitem" aria-expanded={open} aria-level={depth + 1}>
+              <button
+                type="button"
+                className="flex w-full items-center gap-1 py-1 pr-2 text-left font-mono text-[12px] hover:bg-accent"
+                style={pad}
+                title={entry.path}
+                aria-label={`${open ? t("collapseFolder") : t("expandFolder")}: ${entry.name}`}
+                onClick={() => onToggle(entry.path)}
+              >
+                {open ? <ChevronDown className="size-3 shrink-0" /> : <ChevronRight className="size-3 shrink-0" />}
+                <span className="truncate">{entry.name}</span>
+              </button>
+              {open && (
+                <div role="group">
+                  <TreeLevel
+                    parent={entry.path}
+                    depth={depth + 1}
+                    listings={listings}
+                    expanded={expanded}
+                    activePath={activePath}
+                    cwd={cwd}
+                    onToggle={onToggle}
+                    onOpenFile={onOpenFile}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        }
+        const selected = activePath != null && sameProjectFile(entry.path, activePath, cwd);
+        return (
+          <div key={entry.path} role="treeitem" aria-level={depth + 1} aria-selected={selected}>
+            <button
+              type="button"
+              className={cn(
+                "block w-full truncate py-1 pr-2 text-left font-mono text-[12px] hover:bg-accent",
+                selected ? "bg-accent text-primary" : "text-foreground",
+              )}
+              style={{ paddingLeft: 8 + depth * 14 + 16 }}
+              title={entry.path}
+              aria-current={selected ? "true" : undefined}
+              onClick={() => onOpenFile(entry.path)}
+            >
+              {entry.name}
+            </button>
+          </div>
+        );
+      })}
+      {listing.truncated && (
+        <p className="px-2 py-1 text-[12px] leading-relaxed text-muted-foreground" style={pad}>
+          {t("folderListingTruncated")}
+        </p>
+      )}
+    </>
   );
 }
