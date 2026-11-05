@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@/api";
-import { pathCandidates, projectFilePath, remarkOpenablePaths } from "@/answer-paths";
+import { isExternalWebLink, pathCandidates, remarkOpenablePaths, resolveFileHref } from "@/answer-paths";
 import { sameProjectFile } from "@/produced-files";
 
 export function MarkdownMessage({
@@ -10,15 +10,19 @@ export function MarkdownMessage({
   cwd,
   sessionId,
   producedPaths,
+  linkBase,
   onOpenFile,
 }: {
   text: string;
   cwd?: string;
   sessionId?: string;
   producedPaths?: string[];
+  /** Open file, so links inside it resolve next to that file. */
+  linkBase?: string;
   onOpenFile?: (path: string) => void;
 }) {
-  const candidates = useMemo(() => (onOpenFile ? pathCandidates(text) : []), [onOpenFile, text]);
+  const discover = producedPaths != null && Boolean(onOpenFile);
+  const candidates = useMemo(() => (discover ? pathCandidates(text) : []), [discover, text]);
   const producedKey = (producedPaths ?? []).join("\0");
   const producedHits = useMemo(
     () =>
@@ -51,13 +55,20 @@ export function MarkdownMessage({
 
   const openable = useMemo(() => new Set([...producedHits, ...resolved]), [producedHits, resolved]);
   const plugins = useMemo(
-    () => (onOpenFile ? [remarkGfm, remarkOpenablePaths(openable)] : [remarkGfm]),
-    [onOpenFile, openable],
+    () => (discover ? [remarkGfm, remarkOpenablePaths(openable)] : [remarkGfm]),
+    [discover, openable],
   );
   const components = useMemo<Components>(
     () => ({
       a: ({ href, children }) => {
-        const path = href ? projectFilePath(href) : null;
+        if (href && isExternalWebLink(href)) {
+          return (
+            <a href={href} target="_blank" rel="noreferrer noopener">
+              {children}
+            </a>
+          );
+        }
+        const path = href ? resolveFileHref(href, linkBase) : null;
         if (path && onOpenFile) {
           return (
             <button type="button" className="file-link" onClick={() => onOpenFile(path)}>
@@ -65,14 +76,10 @@ export function MarkdownMessage({
             </button>
           );
         }
-        return (
-          <a href={href} target="_blank" rel="noreferrer noopener">
-            {children}
-          </a>
-        );
+        return <span>{children}</span>;
       },
     }),
-    [onOpenFile],
+    [linkBase, onOpenFile],
   );
 
   return (

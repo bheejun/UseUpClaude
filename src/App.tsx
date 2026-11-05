@@ -427,9 +427,10 @@ export default function App() {
         setOpenedFile(null);
         return;
       }
-      setOpenedFile({ sessionId: active.id, path });
+      const match = producedPaths.find((item) => sameProjectFile(item, path, active.cwd)) ?? path;
+      setOpenedFile({ sessionId: active.id, path: match });
     },
-    [active],
+    [active, producedPaths],
   );
 
   useEffect(() => {

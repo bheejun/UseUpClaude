@@ -1,4 +1,50 @@
 const FILE_URL = "project-file:";
+const WEB_LINK = /^https?:\/\//i;
+const OTHER_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+export function isExternalWebLink(href: string): boolean {
+  return WEB_LINK.test(href.trim());
+}
+
+function isOsAbsolute(path: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\") || path.startsWith("/") || path.startsWith("\\");
+}
+
+function parentDir(path: string): string {
+  const norm = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const cut = norm.lastIndexOf("/");
+  return cut < 0 ? "" : norm.slice(0, cut);
+}
+
+function lexicalJoin(dir: string, rel: string): string {
+  const parts = dir.replace(/\\/g, "/").split("/");
+  for (const part of rel.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      const top = parts[parts.length - 1];
+      if (top && /^[A-Za-z]:$/.test(top)) continue;
+      if (!top || top === "..") parts.push("..");
+      else parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+
+/** Path a non-web link should open, or null when it must not navigate. */
+export function resolveFileHref(href: string, linkBase?: string): string | null {
+  const decoded = (projectFilePath(href) ?? href).trim();
+  if (!decoded || isExternalWebLink(decoded)) return null;
+  if (!/^[A-Za-z]:[\\/]/.test(decoded) && OTHER_SCHEME.test(decoded)) return null;
+  const path = (decoded.split(/[?#]/, 1)[0] ?? "").trim();
+  if (!path) return null;
+  if (linkBase && !isOsAbsolute(path)) {
+    const dir = parentDir(linkBase);
+    if (dir) return lexicalJoin(dir, path);
+  }
+  return path;
+}
 
 type MdNode = {
   type: string;
