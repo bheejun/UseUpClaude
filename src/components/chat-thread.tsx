@@ -75,9 +75,12 @@ function ToolEvents({ events }: { events: TurnEvent[] }) {
   const { t } = useI18n();
   const rows = toolRows(events);
   const [openKeys, setOpenKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [groupOpen, setGroupOpen] = useState(false);
   if (rows.length === 0) return null;
 
-  const allOpen = rows.every((row) => openKeys.has(row.key));
+  const grouped = rows.length > 1;
+  const anyPending = rows.some((row) => row.pending);
+  const anyError = rows.some((row) => row.isError);
   const toggle = (key: string) => {
     setOpenKeys((current) => {
       const next = new Set(current);
@@ -86,27 +89,48 @@ function ToolEvents({ events }: { events: TurnEvent[] }) {
       return next;
     });
   };
-  const toggleAll = () => {
-    setOpenKeys(allOpen ? new Set() : new Set(rows.map((row) => row.key)));
-  };
 
   return (
     <div className="mb-2 flex flex-col gap-0.5" role="group" aria-label={t("toolEvent")}>
-      {rows.length > 1 && (
+      {grouped && (
         <button
           type="button"
-          className="self-start rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          onClick={toggleAll}
+          aria-expanded={groupOpen}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left font-mono text-[12px] hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            anyError ? "text-red-100" : "text-foreground",
+          )}
+          onClick={() => setGroupOpen((open) => !open)}
         >
-          {allOpen ? t("collapseTools") : t("expandTools")}
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 text-muted-foreground transition-transform",
+              groupOpen && "rotate-90",
+              anyError && "text-red-100",
+            )}
+          />
+          {anyPending ? (
+            <LoaderCircle className="size-3 shrink-0 animate-spin text-primary" />
+          ) : (
+            <Check className={cn("size-3 shrink-0", anyError ? "text-red-100" : "text-muted-foreground")} />
+          )}
+          <span className="min-w-0 flex-1 truncate">{t("toolGroup", { n: rows.length })}</span>
+          <span
+            className={cn(
+              "shrink-0 text-[10px] uppercase tracking-[0.12em]",
+              anyError ? "text-red-100" : "text-muted-foreground",
+            )}
+          >
+            {anyPending ? t("toolRunning") : t("toolDone")}
+          </span>
         </button>
       )}
-      {rows.map((row) => {
+      {(!grouped || groupOpen) && rows.map((row) => {
         const open = openKeys.has(row.key);
         const preview = rowPreview(row);
         const previewId = `tool-preview-${row.key}`;
         return (
-          <div key={row.key}>
+          <div key={row.key} className={grouped ? "ml-4" : undefined}>
             <button
               type="button"
               aria-expanded={open}
