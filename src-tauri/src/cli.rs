@@ -4,13 +4,13 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -29,6 +29,8 @@ pub enum CliError {
 pub struct ActiveRun {
     pub child: Mutex<Option<Child>>,
     pub cancel_flag: AtomicBool,
+    /// Process group leader. `0` until the child is spawned.
+    pid: AtomicU32,
 }
 
 impl ActiveRun {
@@ -36,6 +38,7 @@ impl ActiveRun {
         Self {
             child: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
+            pid: AtomicU32::new(0),
         }
     }
 }
@@ -312,7 +315,16 @@ pub struct RunOutput {
 struct StreamParse {
     events: Vec<TurnEvent>,
     envelope: Option<CliEnvelope>,
+    /// A `result` line is the CLI's own envelope. It wins over assistant text.
+    result_seen: bool,
+    /// The turn's answer is complete: a finished assistant stop, or a result line.
+    answer_ready: bool,
 }
+
+/// After a finished assistant message, wait briefly for a trailing result line.
+const ANSWER_GRACE: Duration = Duration::from_millis(300);
+/// After the process exits, do not wait out the turn timeout for pipe EOF.
+const EXIT_DRAIN: Duration = Duration::from_millis(500);
 
 pub async fn run_claude_managed(
     spec: RunSpec<'_>,
@@ -335,6 +347,10 @@ pub async fn run_claude_managed(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true);
+    // Own the process group so a hung CLI, and anything it spawned, can be stopped
+    // without waiting out the turn timeout.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     // Chat key only. An Admin key is refused before it can reach the child env.
     let chat_key = match spec.api_key {
@@ -349,12 +365,14 @@ pub async fn run_claude_managed(
     }
 
     let mut child = cmd.spawn()?;
+    let pid = child.id().unwrap_or(0);
+    active.pid.store(pid, Ordering::SeqCst);
 
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| CliError::Message("failed to capture stdout".into()))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| CliError::Message("failed to capture stderr".into()))?;
@@ -362,36 +380,21 @@ pub async fn run_claude_managed(
 
     *active.child.lock().await = Some(child);
 
-    let out_task = async {
-        let mut reader = tokio::io::BufReader::new(stdout);
-        let mut line_bytes = Vec::new();
-        let mut raw_bytes = Vec::new();
-        let mut streamed = StreamParse::default();
-        loop {
-            line_bytes.clear();
-            let n = reader
-                .read_until(b'\n', &mut line_bytes)
-                .await
-                .map_err(CliError::from)?;
-            if n == 0 {
-                break;
-            }
-            raw_bytes.extend_from_slice(&line_bytes);
-            let line = String::from_utf8_lossy(&line_bytes);
-            for event in ingest_stdout_line(&mut streamed, &line) {
-                on_event(&event);
-            }
-        }
-        let raw = String::from_utf8_lossy(&raw_bytes).into_owned();
-        Ok::<_, CliError>((raw, streamed))
-    };
-    let err_task = async {
-        let mut buf = Vec::new();
-        stderr.read_to_end(&mut buf).await.map_err(CliError::from)?;
-        Ok::<_, CliError>(String::from_utf8_lossy(&buf).to_string())
-    };
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut err_reader = tokio::io::BufReader::new(stderr);
+    let mut line_bytes = Vec::new();
+    let mut raw_bytes = Vec::new();
+    let mut err_bytes = Vec::new();
+    let mut err_line = Vec::new();
+    let mut streamed = StreamParse::default();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stdin_done = stdin.is_none();
+    let mut exit_code: Option<i32> = None;
+    let mut answer_grace_until: Option<Instant> = None;
+    let mut exit_drain_until: Option<Instant> = None;
 
-    let in_task = async {
+    let mut stdin_task = std::pin::pin!(async move {
         if let Some(mut stdin) = stdin {
             match stdin.write_all(spec.prompt.as_bytes()).await {
                 Ok(()) => {
@@ -402,53 +405,174 @@ pub async fn run_claude_managed(
             }
         }
         Ok(())
-    };
+    });
 
-    let wait_task = async {
+    let wait_active = Arc::clone(&active);
+    let mut wait_task = std::pin::pin!(async move {
         loop {
-            if active.cancel_flag.load(Ordering::SeqCst) {
-                if let Some(mut c) = active.child.lock().await.take() {
-                    let _ = c.kill().await;
-                }
+            if wait_active.cancel_flag.load(Ordering::SeqCst) {
                 return Err(CliError::Cancelled);
             }
-            {
-                let mut guard = active.child.lock().await;
-                if let Some(c) = guard.as_mut() {
-                    match c.try_wait().map_err(CliError::from)? {
-                        Some(status) => {
+            let status = {
+                let mut guard = wait_active.child.lock().await;
+                if let Some(child) = guard.as_mut() {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
                             let code = status.code().unwrap_or(-1);
                             *guard = None;
-                            return Ok(code);
+                            Some(code)
                         }
-                        None => {}
+                        Ok(None) => None,
+                        Err(e) => return Err(CliError::Io(e)),
                     }
                 } else {
                     return Err(CliError::Cancelled);
                 }
+            };
+            if let Some(code) = status {
+                return Ok(code);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    };
+    });
 
-    let joined = timeout(
-        Duration::from_secs(spec.timeout_secs.max(30)),
-        async { tokio::try_join!(out_task, err_task, wait_task, in_task) },
-    )
-    .await;
+    let deadline = Instant::now() + Duration::from_secs(spec.timeout_secs.max(30));
 
-    match joined {
-        Err(_) => {
-            if let Some(mut c) = active.child.lock().await.take() {
-                let _ = c.kill().await;
+    loop {
+        if active.cancel_flag.load(Ordering::SeqCst) {
+            kill_active(&active).await;
+            return Err(CliError::Cancelled);
+        }
+
+        let now = Instant::now();
+        if streamed.result_seen || (stdout_done && stderr_done && exit_code.is_some()) {
+            break;
+        }
+        if now >= deadline {
+            // A finished answer still counts if the clock runs out while we drain.
+            if streamed.envelope.is_some() {
+                break;
             }
-            Err(CliError::TimedOut(spec.timeout_secs))
+            kill_active(&active).await;
+            return Err(CliError::TimedOut(spec.timeout_secs));
         }
-        Ok(Err(e)) => Err(e),
-        Ok(Ok(((stdout, streamed), stderr, exit_code, ()))) => {
-            *active.child.lock().await = None;
-            Ok(finish_run_output(exit_code, &stdout, &stderr, streamed))
+
+        if streamed.answer_ready && answer_grace_until.is_none() {
+            answer_grace_until = Some(now + ANSWER_GRACE);
         }
+        if exit_code.is_some() && exit_drain_until.is_none() {
+            exit_drain_until = Some(now + EXIT_DRAIN);
+        }
+        if answer_grace_until.is_some_and(|at| now >= at)
+            || exit_drain_until.is_some_and(|at| now >= at)
+        {
+            break;
+        }
+
+        let wake = [Some(deadline), answer_grace_until, exit_drain_until]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(deadline);
+
+        tokio::select! {
+            result = reader.read_until(b'\n', &mut line_bytes), if !stdout_done => {
+                let n = match result {
+                    Ok(n) => n,
+                    Err(e) => {
+                        kill_active(&active).await;
+                        return Err(CliError::Io(e));
+                    }
+                };
+                if n == 0 {
+                    stdout_done = true;
+                } else {
+                    raw_bytes.extend_from_slice(&line_bytes);
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    for event in ingest_stdout_line(&mut streamed, &line) {
+                        on_event(&event);
+                    }
+                    line_bytes.clear();
+                }
+            }
+            result = err_reader.read_until(b'\n', &mut err_line), if !stderr_done => {
+                let n = match result {
+                    Ok(n) => n,
+                    Err(e) => {
+                        kill_active(&active).await;
+                        return Err(CliError::Io(e));
+                    }
+                };
+                if n == 0 {
+                    stderr_done = true;
+                } else {
+                    err_bytes.extend_from_slice(&err_line);
+                    err_line.clear();
+                }
+            }
+            code = &mut wait_task, if exit_code.is_none() => {
+                match code {
+                    Ok(code) => exit_code = Some(code),
+                    Err(CliError::Cancelled) => {
+                        kill_active(&active).await;
+                        return Err(CliError::Cancelled);
+                    }
+                    Err(e) => {
+                        kill_active(&active).await;
+                        return Err(e);
+                    }
+                }
+            }
+            result = &mut stdin_task, if !stdin_done => {
+                if let Err(e) = result {
+                    kill_active(&active).await;
+                    return Err(e);
+                }
+                stdin_done = true;
+            }
+            _ = tokio::time::sleep_until(wake) => {}
+        }
+    }
+
+    let process_code = exit_code;
+    kill_active(&active).await;
+    let code = exit_code_for_answer(process_code, &streamed);
+    let stdout = String::from_utf8_lossy(&raw_bytes);
+    let stderr = String::from_utf8_lossy(&err_bytes);
+    Ok(finish_run_output(code, &stdout, &stderr, streamed))
+}
+
+/// A finished answer is success even when we had to stop a process that did not
+/// exit. A process failure with no answer keeps that process's exit code.
+fn exit_code_for_answer(process_code: Option<i32>, streamed: &StreamParse) -> i32 {
+    match &streamed.envelope {
+        Some(env) if !env.is_error => 0,
+        Some(_) => process_code.filter(|code| *code != 0).unwrap_or(1),
+        None => process_code.unwrap_or(-1),
+    }
+}
+
+fn signal_process_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::process::Command as StdCommand;
+        let _ = StdCommand::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+async fn kill_active(active: &ActiveRun) {
+    signal_process_group(active.pid.load(Ordering::SeqCst));
+    if let Some(mut child) = active.child.lock().await.take() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 }
 
@@ -463,7 +587,9 @@ fn finish_run_output(
     stderr: &str,
     streamed: StreamParse,
 ) -> RunOutput {
-    let StreamParse { events, envelope } = streamed;
+    let StreamParse {
+        events, envelope, ..
+    } = streamed;
     // A result line wins. Pretty-printed `--output-format json` still has no
     // one-line objects, so the whole-document scan remains the fallback.
     if let Some(env) = envelope.or_else(|| interpret_cli_text(stdout)) {
@@ -521,16 +647,106 @@ fn ingest_stdout_line(state: &mut StreamParse, line: &str) -> Vec<TurnEvent> {
         return Vec::new();
     };
     match value.get("type").and_then(Value::as_str) {
-        Some("assistant") => push_tool_blocks(state, &value, TurnEventKind::ToolUse),
+        Some("assistant") => {
+            push_tool_blocks(state, &value, TurnEventKind::ToolUse);
+            // `end_turn` (and any other finished stop) is the answer. `tool_use`
+            // and `pause_turn` mean the CLI is still working, so keep waiting.
+            if let Some(env) = assistant_finished_envelope(&value) {
+                if !state.result_seen {
+                    state.envelope = Some(env);
+                }
+                state.answer_ready = true;
+            }
+        }
         Some("user") => push_tool_blocks(state, &value, TurnEventKind::ToolResult),
         Some("result") => {
             if let Some(env) = envelope_from_value(&value) {
                 state.envelope = Some(env);
+                state.result_seen = true;
+                state.answer_ready = true;
             }
         }
         _ => {}
     }
     state.events[start..].to_vec()
+}
+
+/// `tool_use` and `pause_turn` keep the turn open. Every other stop is finished.
+fn is_finished_stop(reason: &str) -> bool {
+    let reason = reason.trim().to_ascii_lowercase();
+    !reason.is_empty() && !matches!(reason.as_str(), "tool_use" | "pause_turn")
+}
+
+fn stop_reason_of(value: &Value) -> Option<&str> {
+    value
+        .get("message")
+        .and_then(|message| message.get("stop_reason"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("stop_reason").and_then(Value::as_str))
+}
+
+fn session_id_of(value: &Value) -> Option<String> {
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Text of a finished assistant message. Tool blocks stay on the event list.
+fn assistant_finished_envelope(value: &Value) -> Option<CliEnvelope> {
+    let reason = stop_reason_of(value)?;
+    if !is_finished_stop(reason) {
+        return None;
+    }
+    let message = value.get("message")?;
+    let text = assistant_visible_text(message);
+    let error = value
+        .get("error")
+        .and_then(value_as_message)
+        .filter(|item| !item.trim().is_empty());
+    let (result_text, is_error) = if text.trim().is_empty() {
+        match error {
+            Some(error) => (error, true),
+            None => ("(empty response)".to_string(), false),
+        }
+    } else {
+        (text, false)
+    };
+    Some(CliEnvelope {
+        result_text,
+        session_id: session_id_of(value).or_else(|| session_id_of(message)),
+        total_cost_usd: value
+            .get("total_cost_usd")
+            .and_then(value_as_f64)
+            .or_else(|| message.get("total_cost_usd").and_then(value_as_f64)),
+        is_error,
+    })
+}
+
+fn assistant_visible_text(message: &Value) -> String {
+    if let Some(text) = message.get("content").and_then(Value::as_str) {
+        return text.to_string();
+    }
+    let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for block in blocks {
+        let Some(obj) = block.as_object() else {
+            continue;
+        };
+        if obj.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        if let Some(text) = obj.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    parts.join("\n")
 }
 
 fn push_tool_blocks(state: &mut StreamParse, value: &Value, kind: TurnEventKind) {
@@ -987,9 +1203,7 @@ pub(crate) fn cli_key_from_raw(raw: Option<&str>) -> Result<Option<String>, CliE
 
 pub async fn cancel_run(active: &ActiveRun) -> Result<(), CliError> {
     active.cancel_flag.store(true, Ordering::SeqCst);
-    if let Some(mut c) = active.child.lock().await.take() {
-        let _ = c.kill().await;
-    }
+    kill_active(active).await;
     Ok(())
 }
 
@@ -1068,14 +1282,16 @@ mod tests {
 
     #[test]
     fn stored_prose_is_not_unwrapped() {
-        let prose = "Here is an example:\n{\"type\":\"result\",\"result\":\"x\",\"session_id\":\"s\"}";
+        let prose =
+            "Here is an example:\n{\"type\":\"result\",\"result\":\"x\",\"session_id\":\"s\"}";
         assert!(envelope_if_whole_document(prose).is_none());
         let env = interpret_cli_text(prose).expect("stdout scan");
         assert_eq!(env.result_text, "x");
     }
 
     fn pair(args: &[String], name: &str, value: &str) -> bool {
-        args.windows(2).any(|item| item[0] == name && item[1] == value)
+        args.windows(2)
+            .any(|item| item[0] == name && item[1] == value)
     }
 
     #[test]
@@ -1091,8 +1307,12 @@ mod tests {
             for name in ["Edit", "Write", "Bash", "PowerShell"] {
                 assert!(!tools.split(',').any(|tool| tool == name), "{name} leaked");
             }
-            assert!(!args.iter().any(|arg| arg.contains("bypass") || arg.contains("dangerously")));
-            assert!(!args.iter().any(|arg| arg == "--safe-mode" || arg == "--disable-slash-commands"));
+            assert!(!args
+                .iter()
+                .any(|arg| arg.contains("bypass") || arg.contains("dangerously")));
+            assert!(!args
+                .iter()
+                .any(|arg| arg == "--safe-mode" || arg == "--disable-slash-commands"));
         }
     }
 
@@ -1104,17 +1324,25 @@ mod tests {
         for name in ["Skill", "Read", "Edit", "Write"] {
             assert!(tools.split(',').any(|tool| tool == name));
         }
-        assert!(!tools.split(',').any(|tool| tool == "Bash" || tool == "PowerShell"));
-        assert!(!args.iter().any(|arg| arg.contains("bypass") || arg.contains("dangerously")));
+        assert!(!tools
+            .split(',')
+            .any(|tool| tool == "Bash" || tool == "PowerShell"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("bypass") || arg.contains("dangerously")));
     }
 
     #[test]
     fn unrestricted_passes_permission_bypass_without_a_tool_allowlist() {
         let args = permission_args("full");
         assert!(pair(&args, "--permission-mode", "bypassPermissions"));
-        assert!(args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
         assert!(!args.iter().any(|arg| arg == "--allowedTools"));
-        assert!(!args.iter().any(|arg| arg == "--safe-mode" || arg == "--disable-slash-commands"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--safe-mode" || arg == "--disable-slash-commands"));
     }
 
     #[test]
@@ -1199,7 +1427,9 @@ mod tests {
         assert!(!no_model.iter().any(|arg| arg == "--model"));
         assert!(!no_model.iter().any(|arg| arg == "--effort"));
         assert!(!no_model.iter().any(|arg| arg == "--settings"));
-        assert!(no_model.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(no_model
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
         assert!(!no_model.iter().any(|arg| arg == "--resume"));
         assert!(pair(&no_model, "--output-format", "stream-json"));
         assert!(no_model.iter().any(|arg| arg == "--verbose"));
@@ -1207,12 +1437,16 @@ mod tests {
             .iter()
             .any(|arg| arg == "--include-partial-messages"));
         let defaults = print_mode_args(None, None, "read", None, false);
-        assert!(!defaults.iter().any(|arg| arg == "--effort" || arg == "--settings"));
+        assert!(!defaults
+            .iter()
+            .any(|arg| arg == "--effort" || arg == "--settings"));
         for level in ["low", "medium", "high", "xhigh", "max"] {
             let level_args = print_mode_args(None, None, "read", Some(level), false);
             assert!(pair(&level_args, "--effort", level), "{level}");
             assert!(!level_args.iter().any(|arg| arg == "--settings"));
-            assert!(!level_args.iter().any(|arg| arg.contains("hello") || arg.contains('&')));
+            assert!(!level_args
+                .iter()
+                .any(|arg| arg.contains("hello") || arg.contains('&')));
         }
         assert!(normalize_effort(Some("  xhigh ")).as_deref() == Some("xhigh"));
         assert!(normalize_effort(None).is_none());
@@ -1474,5 +1708,321 @@ mod tests {
 
     fn ndjson(lines: &[Value]) -> String {
         lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    fn assistant_line(stop_reason: &str, text: &str) -> Value {
+        json!({
+            "type": "assistant",
+            "session_id": "sess-end",
+            "message": {
+                "role": "assistant",
+                "stop_reason": stop_reason,
+                "content": [
+                    {"type": "thinking", "thinking": "hidden"},
+                    {"type": "text", "text": "calling"},
+                    {"type": "text", "text": text}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn finished_stop_keeps_assistant_text_and_tool_events() {
+        let stdout = ndjson(&[
+            json!({
+                "type": "assistant",
+                "session_id": "sess-tool",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "text", "text": "partial"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Read",
+                            "input": {"path": "a.txt"}
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "file body"
+                    }]
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "session_id": "sess-end",
+                "message": {
+                    "stop_reason": "end_turn",
+                    "content": [
+                        {"type": "thinking", "thinking": "hidden"},
+                        {"type": "text", "text": "Answer text"},
+                        {"type": "text", "text": "more"}
+                    ]
+                }
+            }),
+        ]);
+        let streamed = parse_stream(&stdout);
+        assert!(streamed.answer_ready);
+        assert!(!streamed.result_seen);
+        assert_eq!(exit_code_for_answer(None, &streamed), 0);
+        assert_eq!(exit_code_for_answer(Some(9), &streamed), 0);
+        let out = parse_output(9, stdout, String::new());
+        assert!(out.parse_ok);
+        assert_eq!(out.result_text, "Answer text\nmore");
+        assert!(!out.result_text.contains("partial"));
+        assert!(!out.result_text.contains("hidden"));
+        assert!(!out.result_text.contains("calling"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-end"));
+        assert_eq!(out.events.len(), 2);
+        assert_eq!(out.events[0].kind, TurnEventKind::ToolUse);
+        assert_eq!(out.events[0].name, "Read");
+        assert_eq!(out.events[0].tool_use_id, "toolu_1");
+        assert_eq!(out.events[0].preview, r#"{"path":"a.txt"}"#);
+        assert_eq!(out.events[1].kind, TurnEventKind::ToolResult);
+        assert_eq!(out.events[1].name, "Read");
+        assert_eq!(out.events[1].preview, "file body");
+
+        for reason in [
+            "end_turn",
+            "END_TURN",
+            "stop_sequence",
+            "max_tokens",
+            "refusal",
+            "model_context_window_exceeded",
+        ] {
+            let finished =
+                parse_output(1, ndjson(&[assistant_line(reason, "done")]), String::new());
+            assert!(finished.parse_ok, "{reason}");
+            assert_eq!(finished.result_text, "calling\ndone", "{reason}");
+            assert_eq!(finished.session_id.as_deref(), Some("sess-end"));
+        }
+    }
+
+    #[test]
+    fn tool_use_and_pause_do_not_finish_the_turn() {
+        for reason in ["tool_use", "pause_turn", ""] {
+            let stdout = ndjson(&[json!({
+                "type": "assistant",
+                "message": {
+                    "stop_reason": reason,
+                    "content": [
+                        {"type": "text", "text": "partial"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_9",
+                            "name": "Grep",
+                            "input": {"pattern": "x"}
+                        }
+                    ]
+                }
+            })]);
+            let streamed = parse_stream(&stdout);
+            assert!(!streamed.answer_ready, "{reason}");
+            assert!(streamed.envelope.is_none(), "{reason}");
+            assert_eq!(exit_code_for_answer(Some(7), &streamed), 7, "{reason}");
+            let out = parse_output(7, stdout, "Error: disk full\n".into());
+            assert!(!out.parse_ok, "{reason}");
+            assert!(
+                out.result_text.contains("Error: disk full"),
+                "{}",
+                out.result_text
+            );
+            assert!(!out.result_text.contains("partial"), "{reason}");
+            assert_eq!(out.events.len(), 1, "{reason}");
+            assert_eq!(out.events[0].name, "Grep");
+        }
+    }
+
+    #[test]
+    fn result_line_still_wins_over_finished_assistant_text() {
+        let stdout = ndjson(&[
+            assistant_line("end_turn", "early"),
+            json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "result": "From result",
+                "session_id": "sess-r",
+                "total_cost_usd": 0.25
+            }),
+        ]);
+        let streamed = parse_stream(&stdout);
+        assert!(streamed.answer_ready);
+        assert!(streamed.result_seen);
+        let out = parse_output(0, stdout, String::new());
+        assert_eq!(out.result_text, "From result");
+        assert!(!out.result_text.contains("early"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-r"));
+        assert_eq!(out.total_cost_usd, Some(0.25));
+    }
+
+    #[cfg(unix)]
+    fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn stub_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "useupclaude-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    async fn run_stub(dir: &std::path::Path, binary: &std::path::Path, prompt: &str) -> RunOutput {
+        let active = std::sync::Arc::new(ActiveRun::new());
+        run_claude_managed(
+            RunSpec {
+                binary,
+                prompt,
+                cwd: dir,
+                resume: None,
+                model: None,
+                effort: None,
+                fast_mode: false,
+                allowed_tools_preset: "read",
+                timeout_secs: 30,
+                api_key: Some(""),
+            },
+            active,
+            &|_| {},
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn end_turn_ends_the_run_without_waiting_for_exit() {
+        let dir = stub_dir("end-turn");
+        let script = write_stub(
+            &dir,
+            "claude-stub.sh",
+            r#"#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+printf '%s\n' "$@" > "$dir/argv.txt"
+cat > "$dir/stdin.txt"
+printf '%s\n' '{"type":"assistant","session_id":"sess-tool","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"calling"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a.txt"}}]}}'
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file body"}]}}'
+printf '%s\n' '{"type":"assistant","session_id":"sess-end","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Answer text"}]}}'
+exec sleep 60
+"#,
+        );
+        let prompt = "say \"hello\" & echo off";
+        let started = std::time::Instant::now();
+        let out = run_stub(&dir, &script, prompt).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "took {elapsed:?}"
+        );
+        assert!(out.parse_ok);
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.result_text, "Answer text");
+        assert!(!out.result_text.contains("hidden"));
+        assert!(!out.result_text.contains("calling"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-end"));
+        assert_eq!(out.events.len(), 2);
+        assert_eq!(out.events[0].name, "Read");
+        assert_eq!(out.events[0].tool_use_id, "toolu_1");
+        assert_eq!(out.events[1].kind, TurnEventKind::ToolResult);
+        assert_eq!(out.events[1].preview, "file body");
+        let argv = std::fs::read_to_string(dir.join("argv.txt")).unwrap();
+        let stdin = std::fs::read_to_string(dir.join("stdin.txt")).unwrap();
+        assert_eq!(stdin, prompt);
+        assert!(!argv.contains(prompt));
+        assert!(!argv.contains("hello"));
+        assert!(argv.contains("--output-format"));
+        assert!(argv.contains("stream-json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn result_after_end_turn_is_kept_without_waiting_for_exit() {
+        let dir = stub_dir("result-line");
+        let script = write_stub(
+            &dir,
+            "claude-stub.sh",
+            r#"#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cat > "$dir/stdin.txt"
+printf '%s\n' '{"type":"assistant","session_id":"sess-end","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Early"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"From result","session_id":"sess-r","total_cost_usd":0.25}'
+exec sleep 60
+"#,
+        );
+        let started = std::time::Instant::now();
+        let out = run_stub(&dir, &script, "prompt-on-stdin").await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(out.parse_ok);
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.result_text, "From result");
+        assert_eq!(out.session_id.as_deref(), Some("sess-r"));
+        assert_eq!(out.total_cost_usd, Some(0.25));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("stdin.txt")).unwrap(),
+            "prompt-on-stdin"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_error_without_answer_returns_without_hanging() {
+        let dir = stub_dir("cli-error");
+        let script = write_stub(
+            &dir,
+            "claude-stub.sh",
+            r#"#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cat > "$dir/stdin.txt"
+echo 'Error: disk full' >&2
+# Hold stdout open after this process exits, as a leaked child would.
+sleep 60 &
+exit 7
+"#,
+        );
+        let started = std::time::Instant::now();
+        let out = run_stub(&dir, &script, "prompt-on-stdin").await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "took {elapsed:?}"
+        );
+        assert!(!out.parse_ok);
+        assert_eq!(out.exit_code, 7);
+        assert_eq!(out.result_text, "Error: disk full");
+        assert!(out.events.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("stdin.txt")).unwrap(),
+            "prompt-on-stdin"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
